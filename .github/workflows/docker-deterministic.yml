@@ -1,0 +1,76 @@
+name: Docker Deterministic Build
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'pyproject.toml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'pyproject.toml'
+
+jobs:
+  build-network-off:
+    runs-on: ubuntu-latest
+    name: Build with Network-Off Final Stage
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build dependencies stage
+      run: |
+        docker build \
+          --target dependencies \
+          -t agent-orchestration:deps \
+          -f Dockerfile \
+          .
+    
+    - name: Build builder stage
+      run: |
+        docker build \
+          --target builder \
+          -t agent-orchestration:builder \
+          -f Dockerfile \
+          .
+    
+    - name: Build final stage (network-off)
+      run: |
+        echo "🔒 Building final stage with network disabled..."
+        docker build \
+          --target final \
+          --network none \
+          -t agent-orchestration:deterministic \
+          -f Dockerfile \
+          .
+    
+    - name: Verify image runs
+      run: |
+        docker run --rm agent-orchestration:deterministic python -c "
+        import sys
+        print(f'✅ Image built successfully with Python {sys.version_info.major}.{sys.version_info.minor}')
+        print('✅ Network-off final packaging validated')
+        "
+    
+    - name: Test image functionality
+      run: |
+        docker run --rm agent-orchestration:deterministic python -c "
+        from src.common.config import Config
+        print('✅ Application modules load successfully')
+        "
+    
+    - name: Report success
+      run: |
+        echo "🎉 Deterministic Docker build validated!"
+        echo ""
+        echo "Build stages:"
+        echo "  1. dependencies - Network allowed for package installation"
+        echo "  2. builder - Network allowed for testing"
+        echo "  3. final - 🔒 Network disabled, deterministic packaging"
