@@ -4,6 +4,13 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from src.api.webhook import (
+    webhook_manager,
+    WebhookSubscription,
+    WebhookStatus,
+    WebhookEventType,
+    ALLOWED_EVENT_TYPES,
+)
 
 router = APIRouter()
 registry = AgentRegistry()
@@ -53,6 +60,194 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+# Webhook API routes
+@router.post("/webhooks/subscriptions")
+async def create_webhook_subscription(
+    url: str,
+    event_types: List[str],
+    workspace_id: str,
+    secret: Optional[str] = None,
+):
+    """
+    Create a new webhook subscription with event type allowlist validation.
+    
+    Validates event types against allowlist before creating subscription.
+    """
+    try:
+        subscription = webhook_manager.create_subscription(
+            url=url,
+            event_types=event_types,
+            workspace_id=workspace_id,
+            secret=secret,
+        )
+        return {
+            "subscription_id": subscription.id,
+            "url": subscription.url,
+            "event_types": subscription.event_types,
+            "status": subscription.status,
+            "created_at": subscription.created_at,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/webhooks/subscriptions")
+async def list_webhook_subscriptions(workspace_id: str):
+    """List all webhook subscriptions for a workspace."""
+    subscriptions = webhook_manager.list_subscriptions(workspace_id)
+    return {
+        "subscriptions": [
+            {
+                "id": s.id,
+                "url": s.url,
+                "event_types": s.event_types,
+                "status": s.status,
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            }
+            for s in subscriptions
+        ]
+    }
+
+
+@router.get("/webhooks/subscriptions/{subscription_id}")
+async def get_webhook_subscription(subscription_id: str, workspace_id: str):
+    """Get a specific webhook subscription."""
+    subscription = webhook_manager.get_subscription(subscription_id, workspace_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    return {
+        "id": subscription.id,
+        "url": subscription.url,
+        "event_types": subscription.event_types,
+        "status": subscription.status,
+        "workspace_id": subscription.workspace_id,
+        "created_at": subscription.created_at,
+        "updated_at": subscription.updated_at,
+    }
+
+
+@router.put("/webhooks/subscriptions/{subscription_id}")
+async def update_webhook_subscription(
+    subscription_id: str,
+    workspace_id: str,
+    event_types: Optional[List[str]] = None,
+    url: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Update a webhook subscription with validation."""
+    try:
+        webhook_status = WebhookStatus(status) if status else None
+        subscription = webhook_manager.update_subscription(
+            subscription_id=subscription_id,
+            workspace_id=workspace_id,
+            event_types=event_types,
+            url=url,
+            status=webhook_status,
+        )
+        if not subscription:
+            raise HTTPException(status_code=404, detail="Subscription not found")
+        return {
+            "id": subscription.id,
+            "url": subscription.url,
+            "event_types": subscription.event_types,
+            "status": subscription.status,
+            "updated_at": subscription.updated_at,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/webhooks/subscriptions/{subscription_id}")
+async def delete_webhook_subscription(subscription_id: str, workspace_id: str):
+    """Delete a webhook subscription."""
+    if not webhook_manager.delete_subscription(subscription_id, workspace_id):
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    return {"status": "deleted"}
+
+
+@router.post("/webhooks/subscriptions/{subscription_id}/rotate")
+async def rotate_webhook_secret(subscription_id: str, workspace_id: str):
+    """Rotate webhook secret."""
+    new_secret = webhook_manager.rotate_secret(subscription_id, workspace_id)
+    if not new_secret:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    return {"new_secret": new_secret}
+
+
+@router.post("/webhooks/deliver")
+async def deliver_webhook_event(
+    event_type: str,
+    payload: Dict,
+    workspace_id: str,
+):
+    """Deliver a webhook event to all matching subscriptions."""
+    # Validate event type against allowlist
+    if event_type not in ALLOWED_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid event type: {event_type}. Allowed: {ALLOWED_EVENT_TYPES}"
+        )
+    
+    records = webhook_manager.deliver_event(event_type, payload, workspace_id)
+    return {
+        "deliveries": [
+            {
+                "id": r.id,
+                "subscription_id": r.subscription_id,
+                "status": r.status,
+                "created_at": r.created_at,
+            }
+            for r in records
+        ]
+    }
+
+
+@router.get("/webhooks/deliveries/{delivery_id}")
+async def get_delivery_status(delivery_id: str, workspace_id: str):
+    """Get the status of a webhook delivery."""
+    record = webhook_manager.get_delivery_status(delivery_id, workspace_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    return {
+        "id": record.id,
+        "subscription_id": record.subscription_id,
+        "event_type": record.event_type,
+        "status": record.status,
+        "created_at": record.created_at,
+        "delivered_at": record.delivered_at,
+        "retry_count": record.retry_count,
+        "error_message": record.error_message,
+    }
+
+
+@router.post("/webhooks/deliveries/{delivery_id}/retry")
+async def retry_webhook_delivery(delivery_id: str, workspace_id: str):
+    """Retry a failed webhook delivery with idempotency."""
+    record = webhook_manager.retry_delivery(delivery_id, workspace_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    return {
+        "id": record.id,
+        "status": record.status,
+        "retry_count": record.retry_count,
+        "delivered_at": record.delivered_at,
+        "error_message": record.error_message,
+    }
+
+
+@router.get("/webhooks/event-types")
+async def list_webhook_event_types():
+    """List all allowed webhook event types."""
+    return {
+        "event_types": list(ALLOWED_EVENT_TYPES),
+        "descriptions": {
+            e.value: e.name.lower().replace("_", " ")
+            for e in WebhookEventType
+        }
+    }
 
 # 2019-03-18T11:10:18 update
 
