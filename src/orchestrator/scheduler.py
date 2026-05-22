@@ -1,10 +1,37 @@
-"""Task Scheduler — Priority-based task queuing and dispatch."""
+"""Task Scheduler — Priority-based task queuing and dispatch with fairness budgets."""
 
 import asyncio
 import heapq
+import logging
 import time
-from typing import Any, Dict, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+
+class PriorityClass(Enum):
+    """Priority classes for workflow lanes."""
+    URGENT = "urgent"
+    HIGH = "high"
+    NORMAL = "normal"
+    LOW = "low"
+
+
+class SchedulerError(Exception):
+    """Base scheduler error."""
+    pass
+
+
+class FairnessBudgetExceeded(SchedulerError):
+    """Raised when fairness budget for a priority class is exceeded."""
+    pass
+
+
+class InvalidStateTransition(SchedulerError):
+    """Raised when an invalid state transition is attempted."""
+    pass
 
 
 class PriorityQueue:
@@ -30,56 +57,234 @@ class PriorityQueue:
         return len(self._queue)
 
 
+class FairnessBudget:
+    """Manages fairness budget for a priority class."""
+    
+    def __init__(self, priority_class: PriorityClass, max_concurrent: int, max_queue_depth: int):
+        self.priority_class = priority_class
+        self.max_concurrent = max_concurrent
+        self.max_queue_depth = max_queue_depth
+        self._in_flight: Set[str] = set()
+        self._queued: int = 0
+        self._audit_log: List[Dict] = []
+    
+    def can_accept_task(self) -> bool:
+        """Check if budget can accept another task."""
+        return len(self._in_flight) < self.max_concurrent and self._queued < self.max_queue_depth
+    
+    def record_enqueue(self, task_id: str) -> None:
+        """Record a task being queued."""
+        self._queued += 1
+        self._audit_log.append({
+            "action": "enqueue",
+            "task_id": task_id,
+            "timestamp": time.time(),
+            "priority_class": self.priority_class.value,
+        })
+    
+    def record_dequeue(self, task_id: str) -> None:
+        """Record a task being dequeued (moving from queued to in-flight)."""
+        self._queued = max(0, self._queued - 1)
+        self._in_flight.add(task_id)
+        self._audit_log.append({
+            "action": "dequeue",
+            "task_id": task_id,
+            "timestamp": time.time(),
+            "priority_class": self.priority_class.value,
+        })
+    
+    def record_complete(self, task_id: str) -> None:
+        """Record a task completion."""
+        self._in_flight.discard(task_id)
+        self._audit_log.append({
+            "action": "complete",
+            "task_id": task_id,
+            "timestamp": time.time(),
+            "priority_class": self.priority_class.value,
+        })
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get budget statistics (without exposing task details)."""
+        return {
+            "priority_class": self.priority_class.value,
+            "in_flight_count": len(self._in_flight),
+            "queued_count": self._queued,
+            "utilization": len(self._in_flight) / self.max_concurrent if self.max_concurrent > 0 else 0,
+        }
+
+
 class TaskScheduler:
     def __init__(self):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        
+        # Fairness budgets by priority class
+        self._fairness_budgets: Dict[PriorityClass, FairnessBudget] = {
+            PriorityClass.URGENT: FairnessBudget(PriorityClass.URGENT, max_concurrent=10, max_queue_depth=100),
+            PriorityClass.HIGH: FairnessBudget(PriorityClass.HIGH, max_concurrent=8, max_queue_depth=80),
+            PriorityClass.NORMAL: FairnessBudget(PriorityClass.NORMAL, max_concurrent=5, max_queue_depth=50),
+            PriorityClass.LOW: FairnessBudget(PriorityClass.LOW, max_concurrent=2, max_queue_depth=20),
+        }
+        
+        # Task to priority class mapping
+        self._task_priority_class: Dict[str, PriorityClass] = {}
+    
+    def _get_priority_class(self, priority: int) -> PriorityClass:
+        """Map numeric priority to priority class."""
+        if priority >= 100:
+            return PriorityClass.URGENT
+        elif priority >= 50:
+            return PriorityClass.HIGH
+        elif priority >= 10:
+            return PriorityClass.NORMAL
+        else:
+            return PriorityClass.LOW
+    
+    def _check_atomic_precondition(self, priority_class: PriorityClass, task_id: str) -> bool:
+        """Atomic state precondition check before committing scheduling decision."""
+        budget = self._fairness_budgets[priority_class]
+        
+        # Check if budget can accept this task
+        if not budget.can_accept_task():
+            logger.warning(
+                f"Fairness budget exceeded for {priority_class.value}: "
+                f"in_flight={len(budget._in_flight)}, queued={budget._queued}"
+            )
+            return False
+        
+        # Check for duplicate task (stale/duplicate transition prevention)
+        if task_id in self._in_flight:
+            logger.warning(f"Task {task_id} already in flight - rejecting duplicate")
+            return False
+        
+        return True
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
+        """Enqueue a task with fairness budget enforcement."""
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
         task["retries"] = 0
-
+        
+        # Determine priority class
+        priority_class = self._get_priority_class(priority)
+        task["priority_class"] = priority_class.value
+        self._task_priority_class[task_id] = priority_class
+        
+        # Check fairness budget before accepting
+        budget = self._fairness_budgets[priority_class]
+        if not budget.can_accept_task():
+            logger.error(
+                f"FairnessBudgetExceeded: {priority_class.value} queue full "
+                f"(max_depth={budget.max_queue_depth}, current={budget._queued})"
+            )
+            raise FairnessBudgetExceeded(
+                f"Cannot enqueue task: {priority_class.value} budget exceeded"
+            )
+        
+        # Record in budget
+        budget.record_enqueue(task_id)
+        
+        # Add to queue
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
         self._queues[queue].push(task, priority)
+        
+        logger.info(f"Task {task_id} enqueued with priority_class={priority_class.value}")
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
+        """Schedule a task for future execution."""
         task_id = str(uuid4())
         task["id"] = task_id
+        task["scheduled_at"] = time.time()
+        task["priority"] = priority
+        
+        # Determine priority class
+        priority_class = self._get_priority_class(priority)
+        task["priority_class"] = priority_class.value
+        self._task_priority_class[task_id] = priority_class
+        
         self._scheduled[task_id] = time.time() + delay
         return task_id
 
     async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
+        """Dequeue a task with atomic precondition check."""
         now = time.time()
+        
+        # Process scheduled tasks
         expired = [tid for tid, t in self._scheduled.items() if t <= now]
         for tid in expired:
-            task = self._scheduled.pop(tid)
+            task = self._scheduled.pop(tid, None)
             if task:
-                self.enqueue(task, queue)
-
+                # Re-enqueue with same priority
+                priority = task.get("priority", 0)
+                self.enqueue(task, queue, priority)
+        
         if queue in self._queues and len(self._queues[queue]) > 0:
             task = self._queues[queue].pop()
             if task:
-                self._in_flight[task["id"]] = task
+                task_id = task["id"]
+                priority_class = self._task_priority_class.get(task_id, PriorityClass.NORMAL)
+                
+                # Atomic state precondition check
+                if not self._check_atomic_precondition(priority_class, task_id):
+                    # Re-queue the task if precondition fails
+                    logger.warning(f"Atomic precondition failed for task {task_id}, re-queueing")
+                    self._queues[queue].push(task, task.get("priority", 0))
+                    return None
+                
+                # Record in budget and mark as in-flight
+                budget = self._fairness_budgets[priority_class]
+                budget.record_dequeue(task_id)
+                self._in_flight[task_id] = task
+                
+                logger.info(
+                    f"Task {task_id} dequeued: priority_class={priority_class.value}, "
+                    f"budget_stats={budget.get_stats()}"
+                )
                 return task
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
-
-    def fail(self, task_id: str, queue: str = "default") -> bool:
+        """Mark a task as complete."""
         task = self._in_flight.pop(task_id, None)
         if task:
+            priority_class = self._task_priority_class.pop(task_id, PriorityClass.NORMAL)
+            budget = self._fairness_budgets[priority_class]
+            budget.record_complete(task_id)
+            logger.info(f"Task {task_id} completed: priority_class={priority_class.value}")
+            return True
+        return False
+
+    def fail(self, task_id: str, queue: str = "default") -> bool:
+        """Mark a task as failed with retry logic."""
+        task = self._in_flight.pop(task_id, None)
+        if task:
+            priority_class = self._task_priority_class.get(task_id, PriorityClass.NORMAL)
+            budget = self._fairness_budgets[priority_class]
+            budget.record_complete(task_id)  # Remove from in-flight
+            
             task["retries"] += 1
             if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
-                return True
+                # Re-enqueue with same priority
+                priority = task.get("priority", 0)
+                try:
+                    self.enqueue(task, queue, priority)
+                    return True
+                except FairnessBudgetExceeded:
+                    logger.error(f"Cannot retry task {task_id}: budget exceeded")
+                    return False
         return False
+    
+    def get_fairness_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Get fairness budget statistics for all priority classes."""
+        return {
+            pc.value: budget.get_stats() for pc, budget in self._fairness_budgets.items()
+        }
+
 
 # 2019-04-25T08:37:12 update
 

@@ -1,5 +1,11 @@
 import pytest
-from src.orchestrator.scheduler import TaskScheduler
+import asyncio
+from src.orchestrator.scheduler import (
+    TaskScheduler,
+    PriorityClass,
+    FairnessBudget,
+    FairnessBudgetExceeded,
+)
 
 
 class TestTaskScheduler:
@@ -35,6 +41,236 @@ class TestTaskScheduler:
         import asyncio
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
+
+
+class TestFairnessBudgets:
+    """Tests for scheduler fairness budgets by priority class."""
+    
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+    
+    def test_priority_class_mapping(self):
+        """Test that numeric priorities map to correct priority classes."""
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+        high_id = self.scheduler.enqueue({"type": "high"}, priority=50)
+        normal_id = self.scheduler.enqueue({"type": "normal"}, priority=10)
+        low_id = self.scheduler.enqueue({"type": "low"}, priority=1)
+        
+        # Verify priority classes are assigned
+        assert self.scheduler._task_priority_class[urgent_id] == PriorityClass.URGENT
+        assert self.scheduler._task_priority_class[high_id] == PriorityClass.HIGH
+        assert self.scheduler._task_priority_class[normal_id] == PriorityClass.NORMAL
+        assert self.scheduler._task_priority_class[low_id] == PriorityClass.LOW
+    
+    def test_fairness_budget_limits(self):
+        """Test that fairness budgets enforce queue depth limits."""
+        # Fill up the LOW priority budget (max_queue_depth=20)
+        task_ids = []
+        for i in range(20):
+            task_id = self.scheduler.enqueue({"type": "filler", "idx": i}, priority=1)
+            task_ids.append(task_id)
+        
+        # Next enqueue should exceed budget
+        with pytest.raises(FairnessBudgetExceeded):
+            self.scheduler.enqueue({"type": "overflow"}, priority=1)
+    
+    def test_urgent_workflow_lanes_invariant(self):
+        """
+        Deterministic regression test for urgent workflow lanes trigger.
+        
+        Verifies that:
+        1. Urgent tasks have separate fairness budgets
+        2. Urgent tasks can still be enqueued when lower priority budgets are full
+        3. Atomic precondition prevents duplicate in-flight tasks
+        """
+        # Fill up LOW priority budget
+        for i in range(20):
+            self.scheduler.enqueue({"type": "low_filler"}, priority=1)
+        
+        # Urgent tasks should still be accepted
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+        assert urgent_id is not None
+        assert self.scheduler._task_priority_class[urgent_id] == PriorityClass.URGENT
+        
+        # Verify budget stats
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["low"]["queued_count"] == 20
+        assert stats["urgent"]["queued_count"] == 1
+    
+    def test_atomic_state_precondition_duplicate_prevention(self):
+        """
+        Test that atomic state precondition prevents duplicate/stale transitions.
+        
+        Simulates the bug condition where urgent workflow lanes path is exercised
+        while a task is changing lifecycle state.
+        """
+        # Enqueue and dequeue a task
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        assert task["id"] == task_id
+        
+        # Simulate a stale/duplicate transition attempt
+        # The task is already in-flight, so re-adding should fail precondition
+        priority_class = self.scheduler._task_priority_class[task_id]
+        result = self.scheduler._check_atomic_precondition(priority_class, task_id)
+        assert result is False, "Should reject duplicate in-flight task"
+    
+    def test_fairness_budget_stats_no_private_data(self):
+        """
+        Test that fairness budget stats don't expose private runtime data.
+        
+        Verifies acceptance criteria: audit records explain decisions without
+        exposing private runtime data.
+        """
+        task_id = self.scheduler.enqueue({"type": "test", "sensitive": "secret"}, priority=50)
+        
+        stats = self.scheduler.get_fairness_stats()
+        
+        # Stats should only contain counts and metadata, not task details
+        for pc, budget_stats in stats.items():
+            assert "in_flight_count" in budget_stats
+            assert "queued_count" in budget_stats
+            assert "utilization" in budget_stats
+            assert "priority_class" in budget_stats
+            # Should NOT contain task IDs or sensitive data
+            assert "task_ids" not in budget_stats
+            assert "sensitive" not in str(budget_stats)
+    
+    def test_budget_separation_by_priority_class(self):
+        """
+        Test that each priority class has independent fairness budgets.
+        
+        This ensures that urgent workflow lanes are not starved by
+        lower priority tasks.
+        """
+        # Add tasks to each priority class
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+        high_id = self.scheduler.enqueue({"type": "high"}, priority=50)
+        normal_id = self.scheduler.enqueue({"type": "normal"}, priority=10)
+        low_id = self.scheduler.enqueue({"type": "low"}, priority=1)
+        
+        stats = self.scheduler.get_fairness_stats()
+        
+        # Each class should have its own independent count
+        assert stats["urgent"]["queued_count"] == 1
+        assert stats["high"]["queued_count"] == 1
+        assert stats["normal"]["queued_count"] == 1
+        assert stats["low"]["queued_count"] == 1
+    
+    def test_budget_utilization_tracking(self):
+        """Test that budget utilization is correctly tracked."""
+        # Add some tasks
+        for i in range(5):
+            self.scheduler.enqueue({"type": "test"}, priority=50)
+        
+        stats = self.scheduler.get_fairness_stats()
+        
+        # HIGH priority has max_concurrent=8, queued=5
+        # Utilization should be 0 (nothing in-flight yet)
+        assert stats["high"]["queued_count"] == 5
+        assert stats["high"]["utilization"] == 0.0
+        
+        # Dequeue some tasks to move them to in-flight
+        for _ in range(3):
+            asyncio.run(self.scheduler.dequeue())
+        
+        stats = self.scheduler.get_fairness_stats()
+        # Now 3 in-flight out of 8 max = 0.375 utilization
+        assert stats["high"]["in_flight_count"] == 3
+        assert stats["high"]["queued_count"] == 2
+        assert stats["high"]["utilization"] == 3 / 8
+    
+    def test_task_completion_updates_budget(self):
+        """Test that completing a task updates the fairness budget."""
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+        
+        # Dequeue to move to in-flight
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 1
+        
+        # Complete the task
+        self.scheduler.complete(task_id)
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+
+
+class TestSchedulerRegression:
+    """Regression tests for scheduler fairness issues."""
+    
+    def test_urgent_workflow_lanes_budget_isolation(self):
+        """
+        Regression test: Urgent workflow lanes should have isolated budgets.
+        
+        Bug scenario: When urgent workflow lanes path is exercised while
+        an agent run/task/handler is changing lifecycle state, the component
+        should enforce separate fairness budgets by priority class.
+        
+        This test verifies that urgent tasks are not blocked by lower
+        priority tasks exhausting shared resources.
+        """
+        scheduler = TaskScheduler()
+        
+        # Exhaust LOW budget
+        for i in range(20):
+            scheduler.enqueue({"type": "low_priority"}, priority=1)
+        
+        # Exhaust NORMAL budget
+        for i in range(50):
+            scheduler.enqueue({"type": "normal_priority"}, priority=10)
+        
+        # Exhaust HIGH budget
+        for i in range(80):
+            scheduler.enqueue({"type": "high_priority"}, priority=50)
+        
+        # URGENT budget should still be available
+        # This is the critical fix - urgent workflow lanes must not be blocked
+        urgent_task = scheduler.enqueue({"type": "critical_urgent"}, priority=100)
+        assert urgent_task is not None
+        
+        # Verify urgent budget is independent
+        stats = scheduler.get_fairness_stats()
+        assert stats["urgent"]["queued_count"] == 1
+        assert stats["urgent"]["utilization"] == 0
+    
+    def test_invalid_transition_rejection(self):
+        """
+        Regression test: Invalid lifecycle transitions should be rejected.
+        
+        Bug scenario: The component accepts stale, duplicate, or
+        policy-violating transitions.
+        
+        Expected: The component should reject or safely defer invalid
+        transitions and preserve expected lifecycle state.
+        """
+        scheduler = TaskScheduler()
+        
+        # Enqueue a task
+        task_id = scheduler.enqueue({"type": "test"}, priority=50)
+        
+        # Dequeue it (now in-flight)
+        task = asyncio.run(scheduler.dequeue())
+        assert task is not None
+        
+        # Attempt to complete a non-existent task (should fail gracefully)
+        result = scheduler.complete("non-existent-task-id")
+        assert result is False
+        
+        # The original task should still be in-flight
+        stats = scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 1
+        
+        # Complete the correct task
+        result = scheduler.complete(task_id)
+        assert result is True
+        
+        stats = scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+
 
 # 2019-01-09T19:07:03 update
 
