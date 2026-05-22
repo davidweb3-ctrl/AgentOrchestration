@@ -1,42 +1,139 @@
-"""Configuration management module."""
+"""Configuration management module.
+
+This module provides a Config class for loading and managing application
+configuration from JSON files with environment variable overrides.
+
+Environment Variable Overrides:
+    AO_<VAR_NAME>: Override config values for keys in the allowlist
+    AO_CONFIG_<VAR_NAME>: Always override config values (bypasses allowlist)
+    
+    Examples:
+        AO_APP_NAME=myapp -> sets config['app']['name'] = 'myapp'
+        AO_DATABASE_HOST=localhost -> sets config['database']['host'] = 'localhost'
+        AO_CONFIG_CUSTOM_KEY=value -> sets config['custom']['key'] = 'value'
+"""
 
 import os
 import json
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 class Config:
+    """Configuration manager with file loading and environment overrides.
+    
+    Supports loading configuration from JSON files and overriding values
+    via environment variables. Only allowlisted AO_ variables are imported
+    to prevent runtime-only values (like AO_AGENT_ID) from leaking into
+    config snapshots.
+    
+    Attributes:
+        CONFIG_OVERRIDES_ALLOWLIST: Set of AO_ prefixed env var names that
+            are allowed to override config values.
+        CONFIG_SCOPED_PREFIX: Prefix for env vars that always override config
+            regardless of allowlist.
+    """
+    
     # Allowlist of documented config override keys
     # Only these AO_ prefixed variables will be imported into config
+    # when using the standard AO_ prefix (not AO_CONFIG_)
     CONFIG_OVERRIDES_ALLOWLIST: Set[str] = {
         "AO_APP_NAME",
         "AO_APP_PORT",
+        "AO_APP_DEBUG",
         "AO_DATABASE_HOST",
         "AO_DATABASE_PORT",
         "AO_DATABASE_USER",
         "AO_DATABASE_PASSWORD",
+        "AO_DATABASE_NAME",
         "AO_LOG_LEVEL",
         "AO_LOG_FORMAT",
+        "AO_LOG_OUTPUT",
+        "AO_CACHE_TTL",
+        "AO_CACHE_MAX_SIZE",
+        "AO_TIMEOUT_CONNECT",
+        "AO_TIMEOUT_READ",
     }
+    
+    # Scoped prefix that bypasses allowlist check
+    # AO_CONFIG_* variables are always imported as config overrides
+    CONFIG_SCOPED_PREFIX: str = "AO_CONFIG_"
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        allowed_keys: Optional[List[str]] = None
+    ):
+        """Initialize Config instance.
+        
+        Args:
+            config_path: Optional path to JSON config file to load.
+            allowed_keys: Optional custom allowlist of AO_ variable names.
+                         If provided, replaces the default allowlist.
+        """
         self._data: Dict[str, Any] = {}
+        self._allowed_keys: Set[str] = (
+            set(allowed_keys) if allowed_keys is not None 
+            else set(self.CONFIG_OVERRIDES_ALLOWLIST)
+        )
+        
         if config_path:
             self.load(config_path)
+        
         self._load_env_overrides()
 
     def load(self, path: str) -> None:
-        with open(path) as f:
-            self._data = json.load(f)
+        """Load configuration from a JSON file.
+        
+        Args:
+            path: Path to the JSON configuration file.
+            
+        Raises:
+            FileNotFoundError: If the config file does not exist.
+            json.JSONDecodeError: If the file contains invalid JSON.
+            PermissionError: If the file cannot be read.
+        """
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                self._data = json.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"Invalid JSON in config file {path}: {e.msg}",
+                e.doc,
+                e.pos
+            )
 
     def _load_env_overrides(self) -> None:
-        prefix = "AO_"
+        """Load environment variable overrides into config.
+        
+        Processes environment variables in two categories:
+        1. AO_CONFIG_*: Always imported (bypasses allowlist)
+        2. AO_*: Only imported if in allowlist
+        
+        Variable names are converted to nested config keys:
+        AO_APP_NAME -> config['app']['name']
+        AO_CONFIG_DB_HOST -> config['db']['host']
+        """
         for key, value in os.environ.items():
-            if key.startswith(prefix) and key in self.CONFIG_OVERRIDES_ALLOWLIST:
-                config_key = key[len(prefix):].lower().replace("_", ".")
+            if key.startswith(self.CONFIG_SCOPED_PREFIX):
+                # AO_CONFIG_* variables always override (bypass allowlist)
+                suffix = key[len(self.CONFIG_SCOPED_PREFIX):]
+                config_key = suffix.lower().replace("_", ".")
                 self._set_nested(config_key, value)
+            elif key.startswith("AO_"):
+                # AO_* variables only override if in allowlist
+                if key in self._allowed_keys:
+                    config_key = key[3:].lower().replace("_", ".")
+                    self._set_nested(config_key, value)
 
     def _set_nested(self, key: str, value: Any) -> None:
+        """Set a nested config value using dot notation.
+        
+        Args:
+            key: Dot-separated key path (e.g., 'database.host')
+            value: Value to set at the specified path
+        """
         parts = key.split(".")
         current = self._data
         for part in parts[:-1]:
@@ -46,6 +143,15 @@ class Config:
         current[parts[-1]] = value
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Get a config value using dot notation.
+        
+        Args:
+            key: Dot-separated key path (e.g., 'app.name')
+            default: Default value if key is not found
+            
+        Returns:
+            The config value or default if not found.
+        """
         parts = key.split(".")
         current = self._data
         for part in parts:
@@ -58,10 +164,33 @@ class Config:
         return current
 
     def set(self, key: str, value: Any) -> None:
+        """Set a config value using dot notation.
+        
+        Args:
+            key: Dot-separated key path (e.g., 'database.host')
+            value: Value to set
+        """
         self._set_nested(key, value)
 
-    def to_dict(self) -> Dict:
-        return self._data
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a copy of the configuration as a dictionary.
+        
+        Returns:
+            Deep copy of the current configuration.
+        """
+        return json.loads(json.dumps(self._data))
+
+    def is_allowlisted(self, env_var_name: str) -> bool:
+        """Check if an environment variable name is in the allowlist.
+        
+        Args:
+            env_var_name: The environment variable name to check.
+            
+        Returns:
+            True if the variable is allowlisted, False otherwise.
+        """
+        return env_var_name in self._allowed_keys
+
 
 # 2019-03-14T15:29:32 update
 
