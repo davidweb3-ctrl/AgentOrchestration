@@ -1,3 +1,4 @@
+import os
 import pytest
 from src.common.config import Config
 
@@ -31,6 +32,40 @@ class TestConfig:
         data = config.to_dict()
         assert data["key1"] == "value1"
         assert data["key2"] == "value2"
+
+    def test_env_override_allowlist_blocks_undeclared_vars(self, monkeypatch):
+        """Regression test: Only documented AO_ variables should be imported.
+
+        Issue #2017: Runtime-only values like AO_AGENT_ID should not leak
+        into config snapshots. Only allowlisted keys should be imported.
+        """
+        # Set both allowlisted and non-allowlisted AO_ variables
+        monkeypatch.setenv("AO_APP_NAME", "allowed_app")
+        monkeypatch.setenv("AO_AGENT_ID", "runtime_only_value")  # Should NOT be imported
+        monkeypatch.setenv("AO_UNDOCUMENTED_VAR", "should_not_appear")
+
+        config = Config()
+
+        # Allowlisted variable should be imported
+        assert config.get("app.name") == "allowed_app"
+
+        # Non-allowlisted variables should NOT be imported
+        assert config.get("agent.id") is None
+        assert config.get("undocumented.var") is None
+        assert "agent" not in config.to_dict()
+        assert "undocumented" not in config.to_dict()
+
+    def test_env_override_allowlist_imports_declared_vars(self, monkeypatch):
+        """Test that documented AO_ variables are properly imported."""
+        monkeypatch.setenv("AO_DATABASE_HOST", "db.example.com")
+        monkeypatch.setenv("AO_DATABASE_PORT", "5432")
+        monkeypatch.setenv("AO_LOG_LEVEL", "debug")
+
+        config = Config()
+
+        assert config.get("database.host") == "db.example.com"
+        assert config.get("database.port") == "5432"
+        assert config.get("log.level") == "debug"
 
 # 2019-02-01T18:58:35 update
 

@@ -2,10 +2,23 @@
 
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 
 class Config:
+    # Allowlist of documented config override keys
+    # Only these AO_ prefixed variables will be imported into config
+    CONFIG_OVERRIDES_ALLOWLIST: Set[str] = {
+        "AO_APP_NAME",
+        "AO_APP_PORT",
+        "AO_DATABASE_HOST",
+        "AO_DATABASE_PORT",
+        "AO_DATABASE_USER",
+        "AO_DATABASE_PASSWORD",
+        "AO_LOG_LEVEL",
+        "AO_LOG_FORMAT",
+    }
+
     def __init__(self, config_path: Optional[str] = None):
         self._data: Dict[str, Any] = {}
         if config_path:
@@ -19,7 +32,7 @@ class Config:
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
         for key, value in os.environ.items():
-            if key.startswith(prefix):
+            if key.startswith(prefix) and key in self.CONFIG_OVERRIDES_ALLOWLIST:
                 config_key = key[len(prefix):].lower().replace("_", ".")
                 self._set_nested(config_key, value)
 
