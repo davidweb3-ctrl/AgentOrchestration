@@ -4,9 +4,13 @@ from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
+from .key_settings import router as key_settings_router
 
 router = APIRouter()
 registry = AgentRegistry()
+
+# Include key settings routes with MFA challenge requirement
+router.include_router(key_settings_router, prefix="/settings")
 
 
 @router.get("/agents")
