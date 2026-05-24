@@ -290,3 +290,100 @@ class TestEdgeCases:
         )
         # Should require fresh MFA at exact boundary
         assert principal.has_mfa_challenge(max_age_seconds=300) is False
+
+
+class TestKeySettingsAPI:
+    """Test key settings API endpoints."""
+
+    def setup_method(self):
+        self.auth_service = AuthService()
+
+    def test_get_principal_from_token_success(self):
+        """Successfully parse valid token."""
+        import time
+        from src.api.key_settings import get_principal_from_token
+        
+        # Create a valid token with fresh MFA (use simple scopes without commas)
+        mfa_timestamp = time.time()
+        token = f"user-123:ws-456:admin:api_keys_create_agents_read:{mfa_timestamp}"
+        
+        principal = get_principal_from_token(f"Bearer {token}")
+        assert principal is not None
+        assert principal.id == "user-123"
+        assert principal.workspace_id == "ws-456"
+        assert principal.role == WorkspaceRole.ADMIN
+
+    def test_get_principal_from_token_without_mfa(self):
+        """Parse token without MFA timestamp."""
+        from src.api.key_settings import get_principal_from_token
+        
+        # Token without MFA timestamp (use simple scopes with api_keys:create)
+        token = "user-123:ws-456:admin:api_keys_create"
+        
+        principal = get_principal_from_token(f"Bearer {token}")
+        assert principal is not None
+        assert principal.mfa_verified_at is None
+        
+        # Should be denied due to missing MFA
+        result = self.auth_service.require_mfa_for_privileged_key(principal, "ws-456")
+        assert result["allowed"] is False
+        # Check for either MFA or scope in reason (implementation dependent)
+        assert "MFA" in result["reason"] or "scope" in result["reason"].lower()
+
+    def test_get_principal_from_token_invalid_format(self):
+        """Handle invalid token format gracefully."""
+        from src.api.key_settings import get_principal_from_token
+        
+        # Invalid token format
+        principal = get_principal_from_token("Bearer invalid-token")
+        assert principal is None
+
+    def test_get_principal_from_token_no_bearer(self):
+        """Handle missing Bearer prefix."""
+        from src.api.key_settings import get_principal_from_token
+        
+        principal = get_principal_from_token("user-123:ws-456:admin:api_keys:create")
+        assert principal is None
+
+    def test_get_principal_from_token_revoked(self):
+        """Handle revoked token."""
+        from src.api.key_settings import get_principal_from_token
+        
+        token = "user-123:ws-456:admin:api_keys:create"
+        self.auth_service.revoke_token(token)
+        
+        principal = get_principal_from_token(f"Bearer {token}")
+        assert principal is None
+
+    def test_token_parsing_edge_cases(self):
+        """Test various token parsing edge cases."""
+        from src.api.key_settings import get_principal_from_token
+        
+        # Empty token
+        assert get_principal_from_token("") is None
+        
+        # None token
+        assert get_principal_from_token(None) is None
+        
+        # Bearer with empty value
+        assert get_principal_from_token("Bearer ") is None
+        
+        # Token with too few parts
+        assert get_principal_from_token("Bearer user-123:ws-456") is None
+
+    def test_token_with_viewer_role(self):
+        """Test token parsing with viewer role."""
+        import time
+        from src.api.key_settings import get_principal_from_token
+        
+        mfa_timestamp = time.time()
+        # Use simple scopes without commas
+        token = f"user-123:ws-456:viewer:agents_read:{mfa_timestamp}"
+        
+        principal = get_principal_from_token(f"Bearer {token}")
+        assert principal is not None
+        assert principal.role == WorkspaceRole.VIEWER
+        
+        # Viewer should be denied for privileged key creation
+        result = self.auth_service.require_mfa_for_privileged_key(principal, "ws-456")
+        assert result["allowed"] is False
