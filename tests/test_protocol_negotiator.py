@@ -360,6 +360,185 @@ class TestProtocolNegotiatorEdgeCases:
         assert info is None
 
 
+class TestProtocolCompatibilityAdvanced:
+    """Advanced protocol compatibility tests."""
+
+    def test_backward_compatibility_v2_to_v1(self):
+        """Test V2 is backward compatible with V1 agents."""
+        policy = ProtocolPolicy(
+            min_version=ProtocolVersion.V1,
+            max_version=ProtocolVersion.V2,
+            blocked_versions=set()
+        )
+
+        # V1 should be compatible when V2 is max
+        result = policy.check_compatibility(ProtocolVersion.V1)
+        assert result == ProtocolCompatibility.COMPATIBLE
+
+    def test_forward_compatibility_within_major(self):
+        """Test forward compatibility within same major version."""
+        policy = ProtocolPolicy(
+            min_version=ProtocolVersion.V1,
+            max_version=ProtocolVersion.V3,
+            blocked_versions=set()
+        )
+
+        # All versions should be compatible
+        for version in [ProtocolVersion.V1, ProtocolVersion.V2, ProtocolVersion.V3]:
+            result = policy.check_compatibility(version)
+            assert result == ProtocolCompatibility.COMPATIBLE
+
+    def test_two_majors_behind_rejected(self):
+        """Test that versions two+ majors behind are rejected."""
+        policy = ProtocolPolicy(
+            min_version=ProtocolVersion.V3,
+            max_version=ProtocolVersion.V3,
+            blocked_versions=set()
+        )
+
+        # V1 should be incompatible when only V3 is allowed
+        result = policy.check_compatibility(ProtocolVersion.V1)
+        assert result == ProtocolCompatibility.INCOMPATIBLE
+
+    def test_unknown_version_rejected(self):
+        """Test that unknown/malformed versions are rejected."""
+        policy = ProtocolPolicy(
+            min_version=ProtocolVersion.V1,
+            max_version=ProtocolVersion.V3,
+            blocked_versions=set()
+        )
+
+        # Invalid version should be incompatible
+        with pytest.raises(ValueError):
+            ProtocolVersion("4.0")
+
+    def test_cache_invalidation_single_agent(self):
+        """Test cache invalidation for single agent."""
+        negotiator = ProtocolNegotiator()
+
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        # Populate cache
+        handler = negotiator.resolve_handler("agent-001", "task_a")
+        assert handler is not None
+        assert len(negotiator._cache) > 0
+
+        # Unregister should invalidate cache
+        negotiator.unregister_agent("agent-001")
+        # Cache should be cleared for that agent
+        assert len(negotiator._cache) == 0
+
+    def test_cache_invalidation_global(self):
+        """Test global cache invalidation."""
+        negotiator = ProtocolNegotiator()
+
+        for i in range(3):
+            negotiator.register_agent(
+                agent_id=f"agent-{i}",
+                protocol_version="2.0",
+                capabilities={"tasks": [f"task_{i}"]}
+            )
+
+        # Populate cache for all
+        for i in range(3):
+            negotiator.resolve_handler(f"agent-{i}", f"task_{i}")
+
+        # Block version should invalidate all cache
+        negotiator.block_protocol_version("2.0")
+        assert len(negotiator._cache) == 0
+
+    def test_registry_integration_register(self):
+        """Test protocol validation during registration."""
+        negotiator = ProtocolNegotiator()
+
+        # Valid registration
+        result = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"tasks": ["task_a"]}
+        )
+        assert result is True
+
+        # Invalid version should be rejected
+        result = negotiator.register_agent(
+            agent_id="agent-002",
+            protocol_version="5.0",  # Unknown version
+            capabilities={"tasks": ["task_b"]}
+        )
+        assert result is False
+
+    def test_registry_integration_update(self):
+        """Test protocol validation during update."""
+        negotiator = ProtocolNegotiator()
+
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"tasks": ["task_a"]}
+        )
+
+        # Update protocol version
+        result = negotiator.update_agent_protocol(
+            agent_id="agent-001",
+            new_protocol_version="3.0"
+        )
+        assert result is True
+
+        info = negotiator.get_registry_info("agent-001")
+        assert info["protocol_version"] == ProtocolVersion.V3
+
+    def test_registry_integration_delete(self):
+        """Test cleanup on agent deletion."""
+        negotiator = ProtocolNegotiator()
+
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"tasks": ["task_a"]}
+        )
+
+        # Delete agent
+        result = negotiator.unregister_agent("agent-001")
+        assert result is True
+
+        # Should not be found after deletion
+        info = negotiator.get_registry_info("agent-001")
+        assert info is None
+
+    def test_registry_integration_list_filtering(self):
+        """Test listing with protocol filtering."""
+        negotiator = ProtocolNegotiator()
+
+        negotiator.register_agent(
+            agent_id="agent-v1",
+            protocol_version="1.0",
+            capabilities={"tasks": ["task_a"]}
+        )
+        negotiator.register_agent(
+            agent_id="agent-v2",
+            protocol_version="2.0",
+            capabilities={"tasks": ["task_b"]}
+        )
+        negotiator.register_agent(
+            agent_id="agent-v3",
+            protocol_version="3.0",
+            capabilities={"tasks": ["task_c"]}
+        )
+
+        # List all agents
+        agents = negotiator.list_agents()
+        assert len(agents) == 3
+
+        # Filter by protocol version
+        v2_agents = negotiator.list_agents(protocol_version="2.0")
+        assert len(v2_agents) == 1
+        assert "agent-v2" in v2_agents
+
+
 class TestProtocolVersion:
     """Test protocol version enum."""
 

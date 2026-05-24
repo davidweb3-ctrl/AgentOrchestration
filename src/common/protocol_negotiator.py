@@ -174,6 +174,88 @@ class ProtocolNegotiator:
             logger.error(f"Invalid protocol version: {version}")
             return False
     
+    def unregister_agent(self, agent_id: str) -> bool:
+        """Unregister an agent and cleanup resources.
+        
+        Args:
+            agent_id: Agent identifier
+            
+        Returns:
+            True if agent was unregistered, False if not found
+        """
+        if agent_id not in self._registry:
+            logger.warning(f"Agent {agent_id} not found for unregistration")
+            return False
+        
+        # Invalidate cache entries for this agent
+        self._invalidate_cache(agent_id)
+        
+        # Remove from registry
+        del self._registry[agent_id]
+        
+        logger.info(f"Agent {agent_id} unregistered")
+        return True
+    
+    def update_agent_protocol(self, agent_id: str, new_protocol_version: str) -> bool:
+        """Update agent's protocol version.
+        
+        Args:
+            agent_id: Agent identifier
+            new_protocol_version: New protocol version string
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        if agent_id not in self._registry:
+            logger.warning(f"Agent {agent_id} not found for protocol update")
+            return False
+        
+        try:
+            protocol_version = ProtocolVersion(new_protocol_version)
+        except ValueError:
+            logger.error(f"Invalid protocol version: {new_protocol_version}")
+            return False
+        
+        # Check compatibility
+        compatibility = self._policy.check_compatibility(protocol_version)
+        if compatibility == ProtocolCompatibility.INCOMPATIBLE:
+            logger.warning(
+                f"Protocol version {new_protocol_version} is incompatible for agent {agent_id}"
+            )
+            return False
+        
+        # Invalidate cache
+        self._invalidate_cache(agent_id)
+        
+        # Update agent info
+        self._registry[agent_id]["protocol_version"] = protocol_version
+        self._registry[agent_id]["compatibility"] = compatibility
+        
+        logger.info(f"Agent {agent_id} protocol updated to {new_protocol_version}")
+        return True
+    
+    def list_agents(self, protocol_version: Optional[str] = None) -> list:
+        """List all registered agents, optionally filtered by protocol version.
+        
+        Args:
+            protocol_version: Optional protocol version filter
+            
+        Returns:
+            List of agent IDs
+        """
+        if protocol_version is None:
+            return list(self._registry.keys())
+        
+        try:
+            target_version = ProtocolVersion(protocol_version)
+            return [
+                agent_id for agent_id, info in self._registry.items()
+                if info["protocol_version"] == target_version
+            ]
+        except ValueError:
+            logger.error(f"Invalid protocol version filter: {protocol_version}")
+            return []
+    
     def get_registry_info(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get registration info for agent."""
         return self._registry.get(agent_id)
