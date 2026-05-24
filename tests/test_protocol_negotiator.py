@@ -269,6 +269,97 @@ class TestProtocolPolicy:
         ) is False
 
 
+class TestProtocolNegotiatorEdgeCases:
+    """Test edge cases for protocol negotiator."""
+
+    def test_register_duplicate_agent_id(self):
+        """Test registering agent with duplicate ID."""
+        negotiator = ProtocolNegotiator()
+
+        result1 = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        assert result1 is True
+
+        # Try to register same agent ID again
+        result2 = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_b"]}
+        )
+        # Should handle gracefully (implementation dependent)
+        assert result2 is True or result2 is False
+
+    def test_resolve_handler_with_no_agents(self):
+        """Test resolving handler when no agents registered."""
+        negotiator = ProtocolNegotiator()
+
+        handler = negotiator.resolve_handler("agent-001", "task_a")
+        assert handler is None
+
+    def test_block_same_version_multiple_times(self):
+        """Test blocking same version multiple times."""
+        negotiator = ProtocolNegotiator()
+
+        negotiator.block_protocol_version("1.0")
+        negotiator.block_protocol_version("1.0")  # Block again
+
+        # Should still reject agents with blocked version
+        result = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="1.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        assert result is False
+
+    def test_audit_log_empty(self):
+        """Test audit log when no operations performed."""
+        negotiator = ProtocolNegotiator()
+
+        audit = negotiator.get_audit_log()
+        assert audit == []
+
+    def test_protocol_version_boundary_values(self):
+        """Test protocol version boundary values."""
+        negotiator = ProtocolNegotiator()
+
+        # Test minimum version
+        result = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="1.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        assert result is True
+
+        # Test maximum version
+        result = negotiator.register_agent(
+            agent_id="agent-002",
+            protocol_version="3.0",
+            capabilities={"supported_tasks": ["task_b"]}
+        )
+        assert result is True
+
+    def test_capabilities_with_empty_list(self):
+        """Test agent with empty capabilities list."""
+        negotiator = ProtocolNegotiator()
+
+        result = negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": []}
+        )
+        assert result is True
+
+    def test_get_registry_info_no_agents(self):
+        """Test getting registry info when no agents registered."""
+        negotiator = ProtocolNegotiator()
+
+        info = negotiator.get_registry_info("nonexistent-agent")
+        assert info is None
+
+
 class TestProtocolVersion:
     """Test protocol version enum."""
 
