@@ -96,7 +96,98 @@ class TestFairnessBudgets:
         stats = self.scheduler.get_fairness_stats()
         assert stats["low"]["queued_count"] == 20
         assert stats["urgent"]["queued_count"] == 1
-    
+
+    def test_priority_queue_ordering(self):
+        """Test that priority queue maintains correct ordering."""
+        # Add tasks in reverse priority order
+        low_id = self.scheduler.enqueue({"type": "low"}, priority=1)
+        normal_id = self.scheduler.enqueue({"type": "normal"}, priority=10)
+        high_id = self.scheduler.enqueue({"type": "high"}, priority=50)
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+
+        # Dequeue should return highest priority first
+        task1 = asyncio.run(self.scheduler.dequeue())
+        assert task1["type"] == "urgent"
+
+        task2 = asyncio.run(self.scheduler.dequeue())
+        assert task2["type"] == "high"
+
+        task3 = asyncio.run(self.scheduler.dequeue())
+        assert task3["type"] == "normal"
+
+        task4 = asyncio.run(self.scheduler.dequeue())
+        assert task4["type"] == "low"
+
+    def test_empty_queue_dequeue(self):
+        """Test dequeue from empty queue returns None."""
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is None
+
+    def test_task_fail_releases_budget(self):
+        """Test that failing a task releases the fairness budget."""
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+
+        # Dequeue to move to in-flight
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 1
+
+        # Fail the task
+        self.scheduler.fail(task_id)
+
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+
+    def test_multiple_budgets_independent(self):
+        """Test that different priority class budgets are truly independent."""
+        # Fill LOW budget
+        for i in range(20):
+            self.scheduler.enqueue({"type": "low"}, priority=1)
+
+        # Fill NORMAL budget
+        for i in range(50):
+            self.scheduler.enqueue({"type": "normal"}, priority=10)
+
+        # URGENT should still work
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+        assert urgent_id is not None
+
+        # HIGH should still work
+        high_id = self.scheduler.enqueue({"type": "high"}, priority=50)
+        assert high_id is not None
+
+    def test_concurrent_task_limit_enforcement(self):
+        """Test that concurrent task limit is enforced."""
+        # Add max_concurrent tasks for HIGH priority (8)
+        task_ids = []
+        for i in range(8):
+            task_id = self.scheduler.enqueue({"type": "concurrent"}, priority=50)
+            task_ids.append(task_id)
+
+        # Dequeue all 8 (now in-flight)
+        for _ in range(8):
+            task = asyncio.run(self.scheduler.dequeue())
+            assert task is not None
+
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 8
+        assert stats["high"]["utilization"] == 1.0  # 100% utilized
+
+    def test_duplicate_task_prevention_in_flight(self):
+        """Test that duplicate tasks are prevented when in-flight."""
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+
+        # Dequeue it
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+
+        # Try to check precondition for same task (should fail)
+        priority_class = self.scheduler._task_priority_class[task_id]
+        result = self.scheduler._check_atomic_precondition(priority_class, task_id)
+        assert result is False
+
     def test_atomic_state_precondition_duplicate_prevention(self):
         """
         Test that atomic state precondition prevents duplicate/stale transitions.
@@ -272,31 +363,7 @@ class TestSchedulerRegression:
         assert stats["high"]["in_flight_count"] == 0
 
 
-# 2019-01-09T19:07:03 update
 
-# 2019-02-18T12:30:02 update
-
-# 2019-04-11T16:04:51 update
-
-# 2019-04-17T16:25:46 update
-
-# 2019-05-24T19:32:13 update
-
-# 2019-07-02T12:54:25 update
-
-# 2019-07-03T20:37:00 update
-
-# 2019-08-21T19:37:17 update
-
-# 2019-10-18T10:30:31 update
-
-# 2019-10-25T09:01:38 update
-
-# 2019-10-29T12:59:34 update
-
-# 2019-11-05T10:07:06 update
-
-# 2019-11-11T10:43:52 update
 
 # 2020-01-17T13:40:02 update
 
