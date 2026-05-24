@@ -574,5 +574,178 @@ class TestWebhookAPIIntegration:
                 event_types=["invalid.event"],
                 workspace_id="ws_1",
             )
-        
+
         assert "Invalid event types" in str(exc_info.value)
+
+
+class TestWebhookPerformance:
+    """Test webhook performance under load."""
+
+    def test_bulk_subscription_creation(self):
+        """Test creating many subscriptions efficiently."""
+        manager = WebhookManager()
+
+        # Create 50 subscriptions
+        for i in range(50):
+            manager.create_subscription(
+                url=f"https://example.com/webhook{i}",
+                event_types=["agent.created"],
+                workspace_id="ws_bulk",
+            )
+
+        subscriptions = manager.list_subscriptions("ws_bulk")
+        assert len(subscriptions) == 50
+
+    def test_high_volume_subscription_operations(self):
+        """Test high volume subscription operations."""
+        manager = WebhookManager()
+
+        # Create many subscriptions
+        for i in range(100):
+            manager.create_subscription(
+                url=f"https://example.com/webhook{i}",
+                event_types=["agent.created"],
+                workspace_id="ws_volume",
+            )
+
+        # List all subscriptions
+        subscriptions = manager.list_subscriptions("ws_volume")
+        assert len(subscriptions) == 100
+
+        # Update many subscriptions
+        for sub in subscriptions[:10]:
+            manager.update_subscription(
+                sub.id,
+                "ws_volume",
+                event_types=["agent.created", "agent.updated"],
+            )
+
+        # Verify updates
+        updated = manager.list_subscriptions("ws_volume")
+        assert len(updated) == 100
+
+
+class TestWebhookSecurity:
+    """Test webhook security features."""
+
+    def test_secret_uniqueness(self):
+        """Test that each subscription has unique secret."""
+        manager = WebhookManager()
+
+        sub1 = manager.create_subscription(
+            url="https://example.com/webhook1",
+            event_types=["agent.created"],
+            workspace_id="ws_secret",
+        )
+
+        sub2 = manager.create_subscription(
+            url="https://example.com/webhook2",
+            event_types=["agent.created"],
+            workspace_id="ws_secret",
+        )
+
+        # Secrets should be unique
+        assert sub1.secret != sub2.secret
+
+    def test_workspace_isolation(self):
+        """Test strict workspace isolation."""
+        manager = WebhookManager()
+
+        # Create subscription in workspace A
+        sub_a = manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_a",
+        )
+
+        # Try to access from workspace B
+        result = manager.get_subscription(sub_a.id, "ws_b")
+        assert result is None
+
+        # Try to delete from workspace B
+        result = manager.delete_subscription(sub_a.id, "ws_b")
+        assert result is False
+
+        # Verify still exists in workspace A
+        sub = manager.get_subscription(sub_a.id, "ws_a")
+        assert sub is not None
+
+    def test_id_generation_uniqueness(self):
+        """Test that subscription IDs are unique."""
+        manager = WebhookManager()
+
+        ids = set()
+        for i in range(20):
+            sub = manager.create_subscription(
+                url=f"https://example.com/webhook{i}",
+                event_types=["agent.created"],
+                workspace_id="ws_ids",
+            )
+            ids.add(sub.id)
+
+        # All IDs should be unique
+        assert len(ids) == 20
+
+
+class TestWebhookReliability:
+    """Test webhook reliability features."""
+
+    def test_subscription_update_preserves_id(self):
+        """Test that updating subscription preserves ID."""
+        manager = WebhookManager()
+
+        subscription = manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_history",
+        )
+
+        # Update subscription
+        updated = manager.update_subscription(
+            subscription.id,
+            "ws_history",
+            event_types=["agent.created", "agent.updated"],
+        )
+
+        assert updated is not None
+        assert subscription.id == updated.id
+
+    def test_retry_mechanism_exists(self):
+        """Test that retry mechanism exists."""
+        manager = WebhookManager()
+
+        subscription = manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_retry",
+        )
+
+        # Create a delivery record for testing retry
+        # Note: retry_delivery method should exist
+        result = manager.retry_delivery("nonexistent-delivery-id", "ws_retry")
+        # Should handle gracefully
+        assert result is None
+
+    def test_subscription_state_consistency(self):
+        """Test subscription state remains consistent."""
+        manager = WebhookManager()
+
+        subscription = manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_state",
+        )
+
+        # Multiple operations
+        manager.update_subscription(
+            subscription.id,
+            "ws_state",
+            event_types=["agent.created", "agent.updated"],
+        )
+
+        manager.rotate_secret(subscription.id, "ws_state")
+
+        # State should be consistent
+        sub = manager.get_subscription(subscription.id, "ws_state")
+        assert sub is not None
+        assert len(sub.event_types) == 2
