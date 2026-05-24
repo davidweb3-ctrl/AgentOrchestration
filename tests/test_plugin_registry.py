@@ -254,6 +254,151 @@ class TestPluginRegistryEdgeCases:
         assert len(registry.get_registered_capabilities()) == 10
 
 
+class TestPluginRegistryAdvanced:
+    """Advanced plugin registry tests."""
+
+    def test_plugin_version_upgrade(self):
+        """Test plugin version upgrade scenario."""
+        registry = PluginRegistry()
+
+        # Register initial version
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "cap-a", "version": "1.0"}]
+        )
+
+        # Unregister old version
+        registry.unregister_plugin("plugin-1")
+
+        # Register new version with same capability
+        result = registry.register_plugin(
+            "plugin-1-v2",
+            [{"name": "cap-a", "version": "2.0"}]
+        )
+
+        assert result is True
+
+    def test_capability_conflict_resolution(self):
+        """Test capability conflict resolution."""
+        registry = PluginRegistry()
+
+        # First plugin registers capability
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "shared-cap", "version": "1.0"}]
+        )
+
+        # Second plugin tries to register same capability
+        result = registry.register_plugin(
+            "plugin-2",
+            [{"name": "shared-cap", "version": "2.0"}]
+        )
+
+        # Should be rejected due to duplicate
+        assert result is False
+
+        # First plugin unregisters
+        registry.unregister_plugin("plugin-1")
+
+        # Now second plugin can register
+        result = registry.register_plugin(
+            "plugin-2",
+            [{"name": "shared-cap", "version": "2.0"}]
+        )
+        assert result is True
+
+    def test_bulk_plugin_operations(self):
+        """Test bulk plugin operations."""
+        registry = PluginRegistry()
+
+        # Bulk register
+        for i in range(10):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [{"name": f"cap-{i}", "version": "1.0"}]
+            )
+
+        assert len(registry.get_registered_capabilities()) == 10
+
+        # Bulk unregister
+        for i in range(10):
+            registry.unregister_plugin(f"plugin-{i}")
+
+        assert len(registry.get_registered_capabilities()) == 0
+
+
+class TestPluginRegistryPerformance:
+    """Plugin registry performance tests."""
+
+    def test_large_scale_registration(self):
+        """Test registration with large number of plugins."""
+        registry = PluginRegistry()
+
+        # Register 50 plugins with 2 capabilities each
+        for i in range(50):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [
+                    {"name": f"cap-{i}-a", "version": "1.0"},
+                    {"name": f"cap-{i}-b", "version": "1.0"}
+                ]
+            )
+
+        assert len(registry.get_registered_capabilities()) == 100
+
+    def test_capability_lookup_performance(self):
+        """Test capability lookup with many registered capabilities."""
+        registry = PluginRegistry()
+
+        # Register many capabilities
+        for i in range(100):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [{"name": f"cap-{i}", "version": "1.0"}]
+            )
+
+        # Lookup should be fast (cached)
+        handler = registry.resolve_capability("cap-50")
+        assert handler == "plugin-50"
+
+
+class TestPluginRegistryIntegration:
+    """Plugin registry integration tests."""
+
+    def test_end_to_end_plugin_lifecycle(self):
+        """Test complete plugin lifecycle."""
+        registry = PluginRegistry()
+
+        # 1. Register plugin
+        result = registry.register_plugin(
+            "my-plugin",
+            [
+                {"name": "feature-a", "version": "1.0"},
+                {"name": "feature-b", "version": "1.0"}
+            ]
+        )
+        assert result is True
+
+        # 2. Resolve capabilities
+        handler_a = registry.resolve_capability("feature-a")
+        handler_b = registry.resolve_capability("feature-b")
+        assert handler_a == "my-plugin"
+        assert handler_b == "my-plugin"
+
+        # 3. Get plugin info
+        info = registry.get_plugin_info("my-plugin")
+        assert info is not None
+        assert len(info["capabilities"]) == 2
+
+        # 4. Unregister plugin
+        result = registry.unregister_plugin("my-plugin")
+        assert result is True
+
+        # 5. Verify cleanup
+        assert registry.resolve_capability("feature-a") is None
+        assert registry.get_plugin_info("my-plugin") is None
+
+
 class TestPluginCapability:
     """Test PluginCapability dataclass."""
 
@@ -264,7 +409,7 @@ class TestPluginCapability:
             version="1.0",
             handler="plugin-1"
         )
-        
+
         assert cap.name == "test-cap"
         assert cap.version == "1.0"
         assert cap.handler == "plugin-1"
