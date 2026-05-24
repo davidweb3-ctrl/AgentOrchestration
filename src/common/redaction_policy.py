@@ -24,10 +24,11 @@ class RedactionRule:
 
 class RedactionPolicy:
     """Shared redaction policy for all export formats."""
-    
+
     def __init__(self):
         self._rules: Dict[str, RedactionRule] = {}
         self._default_sensitivity = FieldSensitivity.PUBLIC
+        self._audit_log: List[Dict[str, Any]] = []
     
     def add_rule(self, field_path: str, sensitivity: FieldSensitivity, 
                  mask_value: Any = None) -> None:
@@ -42,21 +43,32 @@ class RedactionPolicy:
                user_role: str = "user") -> Dict[str, Any]:
         """
         Apply redaction to data based on export format and user role.
-        
+
         Args:
             data: The data to redact
             export_format: Target format (json, csv, ui)
             user_role: User role (user, admin)
-        
+
         Returns:
             Redacted data copy
         """
         result = self._deep_copy(data)
-        
+        redacted_fields = []
+
         for field_path, rule in self._rules.items():
             if self._should_redact(rule, export_format, user_role):
                 self._apply_redaction(result, field_path, rule.mask_value)
-        
+                redacted_fields.append(field_path)
+
+        # Log redaction operation
+        if redacted_fields:
+            self._audit_log.append({
+                "timestamp": __import__('time').time(),
+                "export_format": export_format,
+                "user_role": user_role,
+                "redacted_fields": redacted_fields
+            })
+
         return result
     
     def _should_redact(self, rule: RedactionRule, export_format: str,
@@ -108,6 +120,25 @@ class RedactionPolicy:
         return {
             field_path: rule.sensitivity.value
             for field_path, rule in self._rules.items()
+        }
+
+    def get_audit_log(self) -> List[Dict[str, Any]]:
+        """Get audit log of redaction operations.
+
+        Returns:
+            List of audit entries
+        """
+        return self._audit_log.copy()
+
+    def get_redaction_stats(self) -> Dict[str, int]:
+        """Get redaction statistics.
+
+        Returns:
+            Dictionary with redaction statistics
+        """
+        return {
+            "total_redacted": len(self._audit_log),
+            "rules_defined": len(self._rules)
         }
 
 
