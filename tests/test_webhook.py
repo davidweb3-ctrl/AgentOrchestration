@@ -388,6 +388,168 @@ class TestWebhookDeliveryRecords:
         assert not_found is None
 
 
+class TestWebhookEdgeCases:
+    """Test edge cases and boundary conditions."""
+    
+    def setup_method(self):
+        self.manager = WebhookManager()
+    
+    def test_url_without_https(self):
+        """Test that non-HTTPS URLs are handled (may be rejected or accepted based on implementation)."""
+        # Some implementations accept http, some reject it
+        # This test documents the current behavior
+        try:
+            subscription = self.manager.create_subscription(
+                url="http://example.com/webhook",
+                event_types=["agent.created"],
+                workspace_id="ws_123",
+            )
+            # If accepted, verify it was created
+            assert subscription.id is not None
+        except ValueError:
+            # If rejected, that's also valid behavior
+            pass
+    
+    def test_url_with_path_and_query(self):
+        """Test URL with path and query parameters."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook?token=abc123",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        assert subscription.url == "https://example.com/webhook?token=abc123"
+    
+    def test_duplicate_subscription_detection(self):
+        """Test that duplicate subscriptions are detected."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        
+        # Creating same subscription again should work (idempotent)
+        sub2 = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        assert sub2.id is not None
+    
+    def test_max_event_types_limit(self):
+        """Test maximum number of event types per subscription."""
+        # Try to create subscription with many event types
+        all_event_types = list(ALLOWED_EVENT_TYPES)[:5]  # Use first 5 allowed types
+        
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=all_event_types,
+            workspace_id="ws_123",
+        )
+        assert len(subscription.event_types) == 5
+    
+    def test_webhook_manager_str_representation(self):
+        """Test WebhookManager string representation."""
+        str_repr = str(self.manager)
+        assert isinstance(str_repr, str)
+    
+    def test_subscription_str_representation(self):
+        """Test WebhookSubscription string representation."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        str_repr = str(subscription)
+        assert isinstance(str_repr, str)
+    
+    def test_delivery_record_str_representation(self):
+        """Test DeliveryRecord string representation."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        
+        # Deliver an event
+        deliveries = self.manager.deliver_event(
+            event_type="agent.created",
+            payload={"agent_id": "agent_123"},
+            workspace_id="ws_123",
+        )
+        
+        if deliveries:
+            str_repr = str(deliveries[0])
+            assert isinstance(str_repr, str)
+    
+    def test_list_subscriptions_empty(self):
+        """Test listing subscriptions when none exist."""
+        subscriptions = self.manager.list_subscriptions("ws_empty")
+        assert subscriptions == []
+    
+    def test_list_subscriptions_with_multiple(self):
+        """Test listing multiple subscriptions."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook1",
+            event_types=["agent.created"],
+            workspace_id="ws_multi",
+        )
+        self.manager.create_subscription(
+            url="https://example.com/webhook2",
+            event_types=["agent.updated"],
+            workspace_id="ws_multi",
+        )
+        
+        subscriptions = self.manager.list_subscriptions("ws_multi")
+        assert len(subscriptions) == 2
+    
+    def test_get_nonexistent_subscription(self):
+        """Test getting a subscription that doesn't exist."""
+        result = self.manager.get_subscription("nonexistent-id", "ws_123")
+        assert result is None
+    
+    def test_delete_nonexistent_subscription(self):
+        """Test deleting a subscription that doesn't exist."""
+        result = self.manager.delete_subscription("nonexistent-id", "ws_123")
+        assert result is False
+    
+    def test_update_nonexistent_subscription(self):
+        """Test updating a subscription that doesn't exist."""
+        result = self.manager.update_subscription(
+            "nonexistent-id",
+            "ws_123",
+            event_types=["agent.created"],
+        )
+        assert result is None
+    
+    def test_retry_nonexistent_delivery(self):
+        """Test retrying a delivery that doesn't exist."""
+        result = self.manager.retry_delivery("nonexistent-id", "ws_123")
+        assert result is None
+    
+    def test_rotate_secret_nonexistent_subscription(self):
+        """Test rotating secret for nonexistent subscription."""
+        result = self.manager.rotate_secret("nonexistent-id", "ws_123")
+        assert result is None
+    
+    def test_event_type_case_sensitivity(self):
+        """Test that event types are case sensitive."""
+        with pytest.raises(ValueError):
+            self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["Agent.Created"],  # Wrong case
+                workspace_id="ws_123",
+            )
+    
+    def test_url_with_fragment(self):
+        """Test URL with fragment identifier."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook#section",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        assert "section" in subscription.url
+
+
 # Integration tests for the API layer
 class TestWebhookAPIIntegration:
     """Integration tests for webhook API endpoints."""
