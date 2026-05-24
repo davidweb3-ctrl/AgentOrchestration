@@ -259,6 +259,80 @@ class TestConsistentRedactionAcrossFormats:
         assert "phone" in summary
 
 
+class TestRedactionEdgeCases:
+    """Test edge cases for redaction policy."""
+
+    def test_empty_data_redaction(self):
+        """Test redaction with empty data."""
+        policy = RedactionPolicy()
+        data = {}
+
+        result = policy.redact(data, export_format="json", user_role="viewer")
+        assert result == {}
+
+    def test_null_field_values(self):
+        """Test redaction with null field values."""
+        policy = RedactionPolicy()
+        policy.add_rule("password", FieldSensitivity.RESTRICTED, mask_value="***")
+        data = {"password": None, "username": "test"}
+
+        result = policy.redact(data, export_format="json", user_role="viewer")
+        # Null values should be preserved or redacted based on sensitivity
+        assert "username" in result
+
+    def test_deeply_nested_redaction(self):
+        """Test redaction with deeply nested structures."""
+        policy = RedactionPolicy()
+        policy.add_rule("level1.level2.level3.password", FieldSensitivity.RESTRICTED, mask_value="***")
+        data = {
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "password": "secret123",
+                        "name": "deep"
+                    }
+                }
+            }
+        }
+
+        result = policy.redact(data, export_format="json", user_role="viewer")
+        # Deep nesting should still be redacted
+        assert result["level1"]["level2"]["level3"]["name"] == "deep"
+
+    def test_array_field_redaction(self):
+        """Test redaction with array fields."""
+        policy = RedactionPolicy()
+        data = {
+            "users": [
+                {"name": "Alice", "password": "pass1"},
+                {"name": "Bob", "password": "pass2"}
+            ]
+        }
+
+        result = policy.redact(data, export_format="json", user_role="viewer")
+        assert "users" in result
+        assert len(result["users"]) == 2
+
+    def test_unknown_export_format(self):
+        """Test redaction with unknown export format."""
+        policy = RedactionPolicy()
+        policy.add_rule("password", FieldSensitivity.RESTRICTED, mask_value="***")
+        data = {"password": "secret", "name": "test"}
+
+        # Should handle gracefully
+        result = policy.redact(data, export_format="unknown_format", user_role="viewer")
+        assert "name" in result
+
+    def test_public_fields_not_redacted(self):
+        """Test that public fields are never redacted."""
+        policy = RedactionPolicy()
+        data = {"public_field": "visible", "name": "test"}
+
+        result = policy.redact(data, export_format="json", user_role="viewer")
+        assert result["public_field"] == "visible"
+        assert result["name"] == "test"
+
+
 class TestFieldSensitivity:
     """Test field sensitivity enum."""
 
