@@ -206,6 +206,54 @@ class TestPluginRegistry:
         assert result is False
 
 
+class TestPluginRegistryEdgeCases:
+    """Test edge cases for plugin registry."""
+
+    def test_resolve_capability_logs_warning_when_not_found(self):
+        """Test that resolving non-existent capability logs warning."""
+        registry = PluginRegistry()
+        
+        # This should trigger the warning log on line 77
+        handler = registry.resolve_capability("nonexistent-capability")
+        assert handler is None
+
+    def test_register_plugin_with_empty_capabilities(self):
+        """Test registering plugin with empty capabilities list."""
+        registry = PluginRegistry()
+        
+        result = registry.register_plugin("plugin-1", [])
+        # Should succeed but with no capabilities
+        assert result is True
+        assert len(registry.get_registered_capabilities()) == 0
+
+    def test_get_plugin_info_nonexistent(self):
+        """Test getting info for non-existent plugin."""
+        registry = PluginRegistry()
+        
+        info = registry.get_plugin_info("nonexistent")
+        assert info is None
+
+    def test_audit_log_empty(self):
+        """Test audit log when no plugins registered."""
+        registry = PluginRegistry()
+        
+        audit = registry.get_audit_log()
+        assert audit == []
+
+    def test_multiple_capabilities_same_plugin(self):
+        """Test plugin with many capabilities."""
+        registry = PluginRegistry()
+        
+        capabilities = [
+            {"name": f"cap-{i}", "version": "1.0"}
+            for i in range(10)
+        ]
+        
+        result = registry.register_plugin("plugin-1", capabilities)
+        assert result is True
+        assert len(registry.get_registered_capabilities()) == 10
+
+
 class TestPluginCapability:
     """Test PluginCapability dataclass."""
 
