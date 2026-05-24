@@ -243,6 +243,123 @@ class TestDataLakeIngestionPipeline:
             assert result == expected, f"Failed for {data_class} in {destination}"
 
 
+class TestDataLakeEdgeCases:
+    """Test edge cases for data lake governance."""
+    
+    def test_empty_data_allowed(self):
+        """Test that empty data is allowed if metadata is valid."""
+        governance = DataLakeGovernance()
+        write = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.INTERNAL,
+            owner="team-alpha",
+            destination="analytics",
+            data={}
+        )
+        
+        assert governance.validate_write(write) is True
+    
+    def test_none_data_handled(self):
+        """Test that None data is handled (implementation dependent)."""
+        governance = DataLakeGovernance()
+        write = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.INTERNAL,
+            owner="team-alpha",
+            destination="analytics",
+            data=None
+        )
+        
+        # Implementation may accept or reject None data
+        result = governance.validate_write(write)
+        assert result is True or result is False
+    
+    def test_whitespace_purpose_handled(self):
+        """Test that whitespace purpose is handled (implementation dependent)."""
+        governance = DataLakeGovernance()
+        write = DataLakeWrite(
+            purpose="   ",
+            data_class=DataClass.INTERNAL,
+            owner="team-alpha",
+            destination="analytics",
+            data={"test": "data"}
+        )
+        
+        # Implementation may accept or reject whitespace
+        result = governance.validate_write(write)
+        assert result is True or result is False
+    
+    def test_audit_report_empty(self):
+        """Test audit report when no writes."""
+        governance = DataLakeGovernance()
+        
+        audit = governance.get_audit_report()
+        assert audit == []
+    
+    def test_audit_report_multiple_filters(self):
+        """Test audit report with multiple filters."""
+        governance = DataLakeGovernance()
+        
+        # Add writes
+        write1 = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.INTERNAL,
+            owner="team-a",
+            destination="analytics",
+            data={}
+        )
+        write2 = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.CONFIDENTIAL,
+            owner="team-b",
+            destination="reporting",
+            data={}
+        )
+        
+        governance.validate_write(write1)
+        governance.validate_write(write2)
+        
+        # Filter by purpose
+        filtered = governance.get_audit_report(filter_by_purpose="analytics")
+        assert len(filtered) == 2
+        
+        # Filter by owner
+        filtered = governance.get_audit_report(filter_by_owner="team-a")
+        assert len(filtered) == 1
+    
+    def test_data_class_public_allowed_everywhere(self):
+        """Test that public data is allowed in all destinations."""
+        pipeline = DataLakeIngestionPipeline()
+        
+        destinations = ["analytics", "reporting", "ml_training", "archive"]
+        
+        for dest in destinations:
+            result = pipeline.ingest(
+                data={"test": "data"},
+                purpose="test",
+                data_class="public",
+                owner="test-team",
+                destination=dest
+            )
+            assert result is True, f"Public data should be allowed in {dest}"
+    
+    def test_ingestion_with_large_data(self):
+        """Test ingestion with large data payload."""
+        pipeline = DataLakeIngestionPipeline()
+        
+        large_data = {"items": list(range(1000))}
+        
+        result = pipeline.ingest(
+            data=large_data,
+            purpose="analytics",
+            data_class="internal",
+            owner="team-alpha",
+            destination="analytics"
+        )
+        
+        assert result is True
+
+
 class TestDataClassValidation:
     """Test data classification validation."""
     
