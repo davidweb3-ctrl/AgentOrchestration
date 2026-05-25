@@ -130,6 +130,24 @@ class TestPluginRegistry:
         # Cache should be cleared
         assert len(registry._cache) == 0
 
+    def test_resolve_uses_cache(self):
+        """Test that resolve_capability uses cached value on second call."""
+        registry = PluginRegistry()
+        
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+        
+        # First resolve - should populate cache
+        handler1 = registry.resolve_capability("capability-a")
+        assert handler1 == "plugin-1"
+        assert len(registry._cache) == 1
+        
+        # Second resolve - should use cache
+        handler2 = registry.resolve_capability("capability-a")
+        assert handler2 == "plugin-1"
+
     def test_cache_invalidation_on_unregistration(self):
         """Test that cache is invalidated when plugin unregisters."""
         registry = PluginRegistry()
@@ -209,13 +227,18 @@ class TestPluginRegistry:
 class TestPluginRegistryEdgeCases:
     """Test edge cases for plugin registry."""
 
-    def test_resolve_capability_logs_warning_when_not_found(self):
+    def test_resolve_capability_logs_warning_when_not_found(self, caplog):
         """Test that resolving non-existent capability logs warning."""
+        import logging
         registry = PluginRegistry()
         
-        # This should trigger the warning log on line 77
-        handler = registry.resolve_capability("nonexistent-capability")
-        assert handler is None
+        with caplog.at_level(logging.WARNING):
+            # This should trigger the warning log on line 77
+            handler = registry.resolve_capability("nonexistent-capability")
+            assert handler is None
+        
+        # Verify warning was logged
+        assert "not found" in caplog.text or "nonexistent-capability" in caplog.text
 
     def test_register_plugin_with_empty_capabilities(self):
         """Test registering plugin with empty capabilities list."""
