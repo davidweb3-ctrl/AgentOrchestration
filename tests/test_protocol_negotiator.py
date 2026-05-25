@@ -314,6 +314,41 @@ class TestProtocolNegotiatorEdgeCases:
         )
         assert result is False
 
+    def test_block_protocol_version_updates_existing_agents(self):
+        """Test that blocking a version marks existing agents as incompatible."""
+        negotiator = ProtocolNegotiator()
+
+        # Register agents with V2
+        negotiator.register_agent(
+            agent_id="agent-v2-a",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        negotiator.register_agent(
+            agent_id="agent-v2-b",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_b"]}
+        )
+        negotiator.register_agent(
+            agent_id="agent-v3",
+            protocol_version="3.0",
+            capabilities={"supported_tasks": ["task_c"]}
+        )
+
+        # Verify all agents are compatible initially
+        assert negotiator.get_registry_info("agent-v2-a")["compatibility"] == ProtocolCompatibility.COMPATIBLE
+        assert negotiator.get_registry_info("agent-v2-b")["compatibility"] == ProtocolCompatibility.COMPATIBLE
+        assert negotiator.get_registry_info("agent-v3")["compatibility"] == ProtocolCompatibility.COMPATIBLE
+
+        # Block V2
+        negotiator.block_protocol_version("2.0")
+
+        # V2 agents should now be incompatible
+        assert negotiator.get_registry_info("agent-v2-a")["compatibility"] == ProtocolCompatibility.INCOMPATIBLE
+        assert negotiator.get_registry_info("agent-v2-b")["compatibility"] == ProtocolCompatibility.INCOMPATIBLE
+        # V3 agent should still be compatible
+        assert negotiator.get_registry_info("agent-v3")["compatibility"] == ProtocolCompatibility.COMPATIBLE
+
     def test_audit_log_empty(self):
         """Test audit log when no operations performed."""
         negotiator = ProtocolNegotiator()
@@ -553,3 +588,203 @@ class TestProtocolVersion:
         assert ProtocolVersion("1.0") == ProtocolVersion.V1
         assert ProtocolVersion("2.0") == ProtocolVersion.V2
         assert ProtocolVersion("3.0") == ProtocolVersion.V3
+
+
+class TestUnregisterAgent:
+    """Test agent unregistration."""
+
+    def test_unregister_existing_agent(self):
+        """Test unregistering an existing agent."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        result = negotiator.unregister_agent("agent-001")
+        assert result is True
+        assert "agent-001" not in negotiator._registry
+
+    def test_unregister_nonexistent_agent(self):
+        """Test unregistering a non-existent agent."""
+        negotiator = ProtocolNegotiator()
+
+        result = negotiator.unregister_agent("nonexistent-agent")
+        assert result is False
+
+    def test_unregister_invalidates_cache(self):
+        """Test that unregistering invalidates agent's cache entries."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        negotiator.resolve_handler("agent-001", "task_a")
+        assert len(negotiator._cache) > 0
+
+        negotiator.unregister_agent("agent-001")
+        assert len(negotiator._cache) == 0
+
+
+class TestUpdateAgentProtocol:
+    """Test agent protocol updates."""
+
+    def test_update_protocol_success(self):
+        """Test successful protocol version update."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        result = negotiator.update_agent_protocol("agent-001", "3.0")
+        assert result is True
+
+        info = negotiator.get_registry_info("agent-001")
+        assert info["protocol_version"] == ProtocolVersion.V3
+
+    def test_update_protocol_nonexistent_agent(self):
+        """Test updating protocol for non-existent agent."""
+        negotiator = ProtocolNegotiator()
+
+        result = negotiator.update_agent_protocol("nonexistent-agent", "3.0")
+        assert result is False
+
+    def test_update_protocol_invalid_version(self):
+        """Test updating to invalid protocol version."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        result = negotiator.update_agent_protocol("agent-001", "invalid")
+        assert result is False
+
+    def test_update_protocol_incompatible_version(self):
+        """Test updating to incompatible protocol version."""
+        negotiator = ProtocolNegotiator()
+        # Block V3
+        negotiator.block_protocol_version("3.0")
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        result = negotiator.update_agent_protocol("agent-001", "3.0")
+        assert result is False
+
+    def test_update_protocol_invalidates_cache(self):
+        """Test that protocol update invalidates agent's cache."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        negotiator.resolve_handler("agent-001", "task_a")
+        assert len(negotiator._cache) > 0
+
+        negotiator.update_agent_protocol("agent-001", "3.0")
+        assert len(negotiator._cache) == 0
+
+
+class TestListAgents:
+    """Test listing agents."""
+
+    def test_list_all_agents(self):
+        """Test listing all registered agents."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent("agent-1", "2.0", {"tasks": ["a"]})
+        negotiator.register_agent("agent-2", "3.0", {"tasks": ["b"]})
+        negotiator.register_agent("agent-3", "2.0", {"tasks": ["c"]})
+
+        agents = negotiator.list_agents()
+        assert len(agents) == 3
+        assert "agent-1" in agents
+        assert "agent-2" in agents
+        assert "agent-3" in agents
+
+    def test_list_agents_empty(self):
+        """Test listing agents when none registered."""
+        negotiator = ProtocolNegotiator()
+
+        agents = negotiator.list_agents()
+        assert agents == []
+
+    def test_list_agents_with_version_filter(self):
+        """Test listing agents filtered by protocol version."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent("agent-v1", "1.0", {"tasks": ["a"]})
+        negotiator.register_agent("agent-v2a", "2.0", {"tasks": ["b"]})
+        negotiator.register_agent("agent-v2b", "2.0", {"tasks": ["c"]})
+        negotiator.register_agent("agent-v3", "3.0", {"tasks": ["d"]})
+
+        v2_agents = negotiator.list_agents(protocol_version="2.0")
+        assert len(v2_agents) == 2
+        assert "agent-v2a" in v2_agents
+        assert "agent-v2b" in v2_agents
+
+    def test_list_agents_invalid_version_filter(self):
+        """Test listing agents with invalid version filter."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent("agent-1", "2.0", {"tasks": ["a"]})
+
+        agents = negotiator.list_agents(protocol_version="invalid")
+        assert agents == []
+
+
+class TestCacheBehavior:
+    """Test cache behavior in detail."""
+
+    def test_cache_hit_returns_same_handler(self):
+        """Test that cache hit returns the cached handler ID."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        handler1 = negotiator.resolve_handler("agent-001", "task_a")
+        handler2 = negotiator.resolve_handler("agent-001", "task_a")
+
+        assert handler1 == handler2
+        assert "agent-001:task_a" in negotiator._cache
+
+    def test_cache_key_format(self):
+        """Test cache key format."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+
+        negotiator.resolve_handler("agent-001", "task_a")
+        assert "agent-001:task_a" in negotiator._cache
+
+    def test_invalidate_cache_no_matching_entries(self):
+        """Test cache invalidation when no matching entries."""
+        negotiator = ProtocolNegotiator()
+        negotiator.register_agent(
+            agent_id="agent-001",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_a"]}
+        )
+        negotiator.resolve_handler("agent-001", "task_a")
+
+        # Re-register with same ID - should still work
+        negotiator.register_agent(
+            agent_id="agent-002",
+            protocol_version="2.0",
+            capabilities={"supported_tasks": ["task_b"]}
+        )
+
+        # agent-001 cache should still exist
+        assert "agent-001:task_a" in negotiator._cache
