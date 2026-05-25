@@ -376,3 +376,206 @@ class TestDataClassValidation:
         assert DataClass("internal") == DataClass.INTERNAL
         assert DataClass("confidential") == DataClass.CONFIDENTIAL
         assert DataClass("restricted") == DataClass.RESTRICTED
+
+
+class TestDestinationPolicy:
+    """Test destination policy management."""
+    
+    def test_add_destination_policy(self):
+        """Test adding a new destination policy."""
+        governance = DataLakeGovernance()
+        
+        # Add new destination
+        governance.add_destination_policy("new_destination", {DataClass.PUBLIC, DataClass.INTERNAL})
+        
+        # Verify policy works
+        write = DataLakeWrite(
+            purpose="test",
+            data_class=DataClass.INTERNAL,
+            owner="team-test",
+            destination="new_destination",
+            data={"test": "data"}
+        )
+        
+        assert governance.validate_write(write) is True
+    
+    def test_update_destination_policy(self):
+        """Test updating an existing destination policy."""
+        governance = DataLakeGovernance()
+        
+        # Update analytics to only allow PUBLIC
+        governance.add_destination_policy("analytics", {DataClass.PUBLIC})
+        
+        # INTERNAL should now be rejected
+        write = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.INTERNAL,
+            owner="team-test",
+            destination="analytics",
+            data={"test": "data"}
+        )
+        
+        assert governance.validate_write(write) is False
+    
+    def test_custom_policy_registry(self):
+        """Test governance with custom policy registry."""
+        custom_policies = {
+            "custom_dest": {DataClass.PUBLIC},
+            "secure_dest": {DataClass.RESTRICTED}
+        }
+        
+        governance = DataLakeGovernance(policy_registry=custom_policies)
+        
+        # Valid write to custom_dest
+        write1 = DataLakeWrite(
+            purpose="test",
+            data_class=DataClass.PUBLIC,
+            owner="team-a",
+            destination="custom_dest",
+            data={}
+        )
+        assert governance.validate_write(write1) is True
+        
+        # Valid write to secure_dest
+        write2 = DataLakeWrite(
+            purpose="test",
+            data_class=DataClass.RESTRICTED,
+            owner="team-b",
+            destination="secure_dest",
+            data={}
+        )
+        assert governance.validate_write(write2) is True
+        
+        # Invalid write - wrong class for destination
+        write3 = DataLakeWrite(
+            purpose="test",
+            data_class=DataClass.INTERNAL,
+            owner="team-c",
+            destination="secure_dest",
+            data={}
+        )
+        assert governance.validate_write(write3) is False
+
+
+class TestAuditLog:
+    """Test audit log functionality."""
+    
+    def test_audit_log_contains_all_fields(self):
+        """Test that audit log entries contain expected fields."""
+        governance = DataLakeGovernance()
+        
+        write = DataLakeWrite(
+            purpose="analytics",
+            data_class=DataClass.INTERNAL,
+            owner="team-alpha",
+            destination="analytics",
+            data={"metrics": [1, 2, 3]}
+        )
+        
+        governance.validate_write(write)
+        
+        audit = governance.get_audit_report()
+        assert len(audit) == 1
+        entry = audit[0]
+        
+        assert "action" in entry
+        assert "destination" in entry
+        assert "data_class" in entry
+        assert "owner" in entry
+        assert "purpose" in entry
+    
+    def test_audit_log_rejection_reason(self):
+        """Test that rejection audit entries include reason."""
+        governance = DataLakeGovernance()
+        
+        write = DataLakeWrite(
+            purpose="",
+            data_class=DataClass.INTERNAL,
+            owner="team-alpha",
+            destination="analytics",
+            data={}
+        )
+        
+        governance.validate_write(write)
+        
+        audit = governance.get_audit_report()
+        assert audit[0]["action"] == "reject"
+        assert "reason" in audit[0]
+    
+    def test_audit_log_allowed_classes(self):
+        """Test that policy violation includes allowed classes."""
+        governance = DataLakeGovernance()
+        
+        write = DataLakeWrite(
+            purpose="training",
+            data_class=DataClass.RESTRICTED,
+            owner="team-beta",
+            destination="ml_training",
+            data={}
+        )
+        
+        governance.validate_write(write)
+        
+        audit = governance.get_audit_report()
+        entry = audit[0]
+        assert entry["action"] == "reject"
+        assert "allowed_classes" in entry
+        assert isinstance(entry["allowed_classes"], list)
+
+
+class TestPipelineEdgeCases:
+    """Test pipeline edge cases."""
+    
+    def test_pipeline_with_custom_governance(self):
+        """Test pipeline with custom governance instance."""
+        custom_governance = DataLakeGovernance()
+        custom_governance.add_destination_policy("custom", {DataClass.PUBLIC})
+        
+        pipeline = DataLakeIngestionPipeline(governance=custom_governance)
+        
+        result = pipeline.ingest(
+            data={"test": "data"},
+            purpose="test",
+            data_class="public",
+            owner="team-test",
+            destination="custom"
+        )
+        
+        assert result is True
+    
+    def test_ingestion_data_storage(self):
+        """Test that ingested data is properly stored."""
+        pipeline = DataLakeIngestionPipeline()
+        
+        test_data = {"key": "value", "nested": {"data": "test"}}
+        
+        result = pipeline.ingest(
+            data=test_data,
+            purpose="analytics",
+            data_class="internal",
+            owner="team-alpha",
+            destination="analytics"
+        )
+        
+        assert result is True
+        # Data should be accessible via _ingested_data
+        key = "analytics/team-alpha/analytics"
+        assert key in pipeline._ingested_data
+        assert pipeline._ingested_data[key]["data"] == test_data
+    
+    def test_unknown_destination_rejected(self):
+        """Test that writes to unknown destinations are rejected."""
+        governance = DataLakeGovernance()
+        
+        write = DataLakeWrite(
+            purpose="test",
+            data_class=DataClass.PUBLIC,
+            owner="team-test",
+            destination="unknown_destination",
+            data={}
+        )
+        
+        assert governance.validate_write(write) is False
+        
+        audit = governance.get_audit_report()
+        assert audit[0]["reason"] == "destination_policy_violation"
