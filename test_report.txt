@@ -1,0 +1,31 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-9.0.3, pluggy-1.6.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/openclaw/.openclaw/workspace/AgentOrchestration
+configfile: pyproject.toml
+plugins: cov-7.1.0, anyio-4.13.0
+collecting ... collected 12 items
+
+tests/test_data_lake_governance.py::TestDataLakeGovernance::test_valid_write_allowed PASSED [  8%]
+tests/test_data_lake_governance.py::TestDataLakeGovernance::test_missing_fields_rejected PASSED [ 16%]
+tests/test_data_lake_governance.py::TestDataLakeGovernance::test_destination_policy_violation PASSED [ 25%]
+tests/test_data_lake_governance.py::TestDataLakeGovernance::test_audit_report_filtering_by_purpose PASSED [ 33%]
+tests/test_data_lake_governance.py::TestDataLakeGovernance::test_audit_report_filtering_by_owner PASSED [ 41%]
+tests/test_data_lake_governance.py::TestDataLakeIngestionPipeline::test_successful_ingestion PASSED [ 50%]
+tests/test_data_lake_governance.py::TestDataLakeIngestionPipeline::test_ingestion_rejected_by_governance PASSED [ 58%]
+tests/test_data_lake_governance.py::TestDataLakeIngestionPipeline::test_ingestion_with_invalid_data_class PASSED [ 66%]
+tests/test_data_lake_governance.py::TestDataLakeIngestionPipeline::test_multiple_ingestions PASSED [ 75%]
+tests/test_data_lake_governance.py::TestDataLakeIngestionPipeline::test_data_class_all_levels PASSED [ 83%]
+tests/test_data_lake_governance.py::TestDataClassValidation::test_data_class_enum_values PASSED [ 91%]
+tests/test_data_lake_governance.py::TestDataClassValidation::test_data_class_from_string PASSED [100%]
+
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.10.12-final-0 _______________
+
+Name                                 Stmts   Miss  Cover
+--------------------------------------------------------
+src/common/data_lake_governance.py      60      1    98%
+--------------------------------------------------------
+TOTAL                                   60      1    98%
+Coverage HTML written to dir htmlcov
+============================== 12 passed in 0.30s ==============================
