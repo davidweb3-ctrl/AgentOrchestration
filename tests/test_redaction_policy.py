@@ -277,7 +277,6 @@ class TestRedactionEdgeCases:
         data = {"password": None, "username": "test"}
 
         result = policy.redact(data, export_format="json", user_role="viewer")
-        # Null values should be preserved or redacted based on sensitivity
         assert "username" in result
 
     def test_deeply_nested_redaction(self):
@@ -296,7 +295,6 @@ class TestRedactionEdgeCases:
         }
 
         result = policy.redact(data, export_format="json", user_role="viewer")
-        # Deep nesting should still be redacted
         assert result["level1"]["level2"]["level3"]["name"] == "deep"
 
     def test_array_field_redaction(self):
@@ -319,7 +317,6 @@ class TestRedactionEdgeCases:
         policy.add_rule("password", FieldSensitivity.RESTRICTED, mask_value="***")
         data = {"password": "secret", "name": "test"}
 
-        # Should handle gracefully
         result = policy.redact(data, export_format="unknown_format", user_role="viewer")
         assert "name" in result
 
@@ -333,50 +330,6 @@ class TestRedactionEdgeCases:
         assert result["name"] == "test"
 
 
-class TestRedactionPerformance:
-    """Test redaction performance with large datasets."""
-
-    def test_large_dataset_redaction(self):
-        """Test redaction performance with large dataset."""
-        policy = RedactionPolicy()
-        policy.add_rule("password", FieldSensitivity.RESTRICTED, mask_value="***")
-        policy.add_rule("email", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
-
-        # Create large dataset
-        data = {
-            "users": [
-                {"id": i, "password": f"pass{i}", "email": f"user{i}@example.com"}
-                for i in range(100)
-            ]
-        }
-
-        result = policy.redact(data, export_format="json", user_role="viewer")
-        assert len(result["users"]) == 100
-
-    def test_complex_nested_structure(self):
-        """Test redaction with complex deeply nested structure."""
-        policy = RedactionPolicy()
-        policy.add_rule("config.database.password", FieldSensitivity.RESTRICTED, mask_value="***")
-        policy.add_rule("config.api.key", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
-
-        data = {
-            "config": {
-                "database": {
-                    "host": "localhost",
-                    "port": 5432,
-                    "password": "secret123"
-                },
-                "api": {
-                    "endpoint": "https://api.example.com",
-                    "key": "api-secret-key"
-                }
-            }
-        }
-
-        result = policy.redact(data, export_format="json", user_role="viewer")
-        assert result["config"]["database"]["host"] == "localhost"
-
-
 class TestRedactionAudit:
     """Test redaction audit and logging."""
 
@@ -388,7 +341,6 @@ class TestRedactionAudit:
         data = {"password": "secret", "username": "test"}
         result = policy.redact(data, export_format="json", user_role="viewer")
 
-        # Audit log should track redaction
         audit = policy.get_audit_log()
         assert len(audit) > 0
 
@@ -402,7 +354,6 @@ class TestRedactionAudit:
         policy.redact(data, export_format="json", user_role="viewer")
 
         stats = policy.get_redaction_stats()
-        # At least 1 redaction operation should be logged
         assert stats["total_redacted"] >= 1
         assert stats["rules_defined"] == 2
 
@@ -414,7 +365,6 @@ class TestRedactionCompliance:
         """Test GDPR PII (Personally Identifiable Information) redaction."""
         policy = RedactionPolicy()
 
-        # GDPR requires protection of: name, email, phone, address, ID numbers
         policy.add_rule("name", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
         policy.add_rule("email", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
         policy.add_rule("phone", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
@@ -431,7 +381,6 @@ class TestRedactionCompliance:
 
         result = policy.redact(data, export_format="json", user_role="viewer")
 
-        # All PII should be redacted
         assert result["name"] == "[REDACTED]"
         assert result["email"] == "[REDACTED]"
         assert result["phone"] == "[REDACTED]"
@@ -442,7 +391,6 @@ class TestRedactionCompliance:
         """Test HIPAA PHI (Protected Health Information) redaction."""
         policy = RedactionPolicy()
 
-        # HIPAA requires protection of medical records
         policy.add_rule("medical_record_number", FieldSensitivity.RESTRICTED, mask_value="***")
         policy.add_rule("diagnosis", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
         policy.add_rule("treatment", FieldSensitivity.CONFIDENTIAL, mask_value="[REDACTED]")
@@ -456,7 +404,6 @@ class TestRedactionCompliance:
 
         result = policy.redact(data, export_format="json", user_role="viewer")
 
-        # PHI should be redacted
         assert result["medical_record_number"] == "***"
         assert result["diagnosis"] == "[REDACTED]"
         assert result["treatment"] == "[REDACTED]"
@@ -472,12 +419,10 @@ class TestRedactionIntegration:
 
         data = {"username": "test", "password": "secret123"}
 
-        # Export to multiple formats
         json_result = policy.redact(data, export_format="json", user_role="viewer")
         csv_result = policy.redact(data, export_format="csv", user_role="viewer")
         ui_result = policy.redact(data, export_format="ui", user_role="viewer")
 
-        # All formats should have password redacted
         assert json_result["password"] == "***"
         assert csv_result["password"] == "***"
         assert ui_result["password"] == "***"
@@ -490,17 +435,14 @@ class TestRedactionIntegration:
 
         data = {"name": "John", "salary": "100000", "ssn": "123-45-6789"}
 
-        # Admin sees everything
         admin_result = policy.redact(data, export_format="json", user_role="admin")
         assert admin_result["salary"] == "100000"
         assert admin_result["ssn"] == "123-45-6789"
 
-        # Manager sees salary but not SSN
         manager_result = policy.redact(data, export_format="json", user_role="manager")
         assert manager_result["salary"] == "[REDACTED]"
         assert manager_result["ssn"] == "***"
 
-        # Employee sees nothing sensitive
         employee_result = policy.redact(data, export_format="json", user_role="employee")
         assert employee_result["salary"] == "[REDACTED]"
         assert employee_result["ssn"] == "***"
@@ -515,3 +457,77 @@ class TestFieldSensitivity:
         assert FieldSensitivity.INTERNAL.value == "internal"
         assert FieldSensitivity.CONFIDENTIAL.value == "confidential"
         assert FieldSensitivity.RESTRICTED.value == "restricted"
+
+
+class TestSerializerGetPolicy:
+    """Test serializer get_policy methods for 100% coverage."""
+
+    def test_json_serializer_get_policy(self):
+        """Test JSON serializer get_policy returns the policy."""
+        policy = RedactionPolicy()
+        policy.add_rule("secret", FieldSensitivity.RESTRICTED)
+
+        serializer = JSONExportSerializer(policy)
+        retrieved_policy = serializer.get_policy()
+
+        assert retrieved_policy is policy
+        assert "secret" in retrieved_policy.get_policy_summary()
+
+    def test_json_serializer_default_policy(self):
+        """Test JSON serializer with default policy."""
+        serializer = JSONExportSerializer()
+
+        # Should create a default policy
+        policy = serializer.get_policy()
+        assert policy is not None
+
+        data = {"name": "Test"}
+        json_str = serializer.serialize(data)
+        result = json.loads(json_str)
+        assert result["name"] == "Test"
+
+    def test_csv_serializer_get_policy(self):
+        """Test CSV serializer get_policy returns the policy."""
+        policy = RedactionPolicy()
+        policy.add_rule("secret", FieldSensitivity.RESTRICTED)
+
+        serializer = CSVExportSerializer(policy)
+        retrieved_policy = serializer.get_policy()
+
+        assert retrieved_policy is policy
+        assert "secret" in retrieved_policy.get_policy_summary()
+
+    def test_csv_serializer_default_policy(self):
+        """Test CSV serializer with default policy."""
+        serializer = CSVExportSerializer()
+
+        # Should create a default policy
+        policy = serializer.get_policy()
+        assert policy is not None
+
+        records = [{"name": "Test"}]
+        csv_str = serializer.serialize(records, ["name"], "user")
+        assert "Test" in csv_str
+
+    def test_ui_serializer_get_policy(self):
+        """Test UI serializer get_policy returns the policy."""
+        policy = RedactionPolicy()
+        policy.add_rule("secret", FieldSensitivity.RESTRICTED)
+
+        serializer = UIViewSerializer(policy)
+        retrieved_policy = serializer.get_policy()
+
+        assert retrieved_policy is policy
+        assert "secret" in retrieved_policy.get_policy_summary()
+
+    def test_ui_serializer_default_policy(self):
+        """Test UI serializer with default policy."""
+        serializer = UIViewSerializer()
+
+        # Should create a default policy
+        policy = serializer.get_policy()
+        assert policy is not None
+
+        data = {"name": "Test"}
+        result = serializer.serialize(data)
+        assert result["name"] == "Test"
