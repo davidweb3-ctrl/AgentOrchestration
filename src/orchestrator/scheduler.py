@@ -207,7 +207,8 @@ class TaskScheduler:
         task["priority_class"] = priority_class.value
         self._task_priority_class[task_id] = priority_class
         
-        self._scheduled[task_id] = time.time() + delay
+        # Store task dict with execution time
+        self._scheduled[task_id] = {"task": task, "execute_at": time.time() + delay}
         return task_id
 
     async def dequeue(self, queue: str = "default", timeout: float = 1.0) -> Optional[Dict]:
@@ -215,11 +216,12 @@ class TaskScheduler:
         now = time.time()
         
         # Process scheduled tasks
-        expired = [tid for tid, t in self._scheduled.items() if t <= now]
+        expired = [tid for tid, t in self._scheduled.items() if t["execute_at"] <= now]
         for tid in expired:
-            task = self._scheduled.pop(tid, None)
-            if task:
+            scheduled_item = self._scheduled.pop(tid, None)
+            if scheduled_item:
                 # Re-enqueue with same priority
+                task = scheduled_item["task"]
                 priority = task.get("priority", 0)
                 self.enqueue(task, queue, priority)
         

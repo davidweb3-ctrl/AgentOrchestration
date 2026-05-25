@@ -1,11 +1,70 @@
 import pytest
 import asyncio
+import time
 from src.orchestrator.scheduler import (
     TaskScheduler,
     PriorityClass,
     FairnessBudget,
     FairnessBudgetExceeded,
+    InvalidStateTransition,
+    PriorityQueue,
 )
+
+
+class TestPriorityQueue:
+    """Tests for the PriorityQueue class."""
+    
+    def test_push_and_pop(self):
+        """Test basic push and pop operations."""
+        pq = PriorityQueue()
+        pq.push("low", priority=1)
+        pq.push("high", priority=10)
+        pq.push("medium", priority=5)
+        
+        # Should pop highest priority first
+        assert pq.pop() == "high"
+        assert pq.pop() == "medium"
+        assert pq.pop() == "low"
+    
+    def test_peek(self):
+        """Test peek returns highest priority item without removing it."""
+        pq = PriorityQueue()
+        pq.push("first", priority=5)
+        pq.push("second", priority=10)
+        
+        # Peek should return highest priority
+        assert pq.peek() == "second"
+        # Item should still be in queue
+        assert pq.peek() == "second"
+        # Length should be unchanged
+        assert len(pq) == 2
+    
+    def test_peek_empty_queue(self):
+        """Test peek on empty queue returns None."""
+        pq = PriorityQueue()
+        assert pq.peek() is None
+    
+    def test_len(self):
+        """Test queue length tracking."""
+        pq = PriorityQueue()
+        assert len(pq) == 0
+        
+        pq.push("item1", priority=1)
+        assert len(pq) == 1
+        
+        pq.push("item2", priority=2)
+        assert len(pq) == 2
+        
+        pq.pop()
+        assert len(pq) == 1
+        
+        pq.pop()
+        assert len(pq) == 0
+    
+    def test_pop_empty_queue(self):
+        """Test pop on empty queue returns None."""
+        pq = PriorityQueue()
+        assert pq.pop() is None
 
 
 class TestTaskScheduler:
@@ -288,6 +347,112 @@ class TestFairnessBudgets:
         
         stats = self.scheduler.get_fairness_stats()
         assert stats["high"]["in_flight_count"] == 0
+    
+    def test_schedule_delayed_task(self):
+        """Test scheduling a task for future execution."""
+        task = {"type": "delayed", "payload": "data"}
+        task_id = self.scheduler.schedule(task, delay=0.1, priority=50)
+        
+        assert task_id is not None
+        assert task_id in self.scheduler._scheduled
+        
+        # Before delay expires, queue should be empty
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is None
+        
+        # Wait for delay to expire
+        time.sleep(0.15)
+        
+        # Now the scheduled task should be enqueued
+        result = asyncio.run(self.scheduler.dequeue())
+        assert result is not None
+        assert result["type"] == "delayed"
+    
+    def test_schedule_multiple_delayed_tasks(self):
+        """Test scheduling multiple tasks with different delays."""
+        # Schedule tasks with different delays
+        self.scheduler.schedule({"type": "first"}, delay=0.05, priority=10)
+        self.scheduler.schedule({"type": "second"}, delay=0.1, priority=20)
+        
+        # Wait for first task
+        time.sleep(0.06)
+        result1 = asyncio.run(self.scheduler.dequeue())
+        assert result1 is not None
+        assert result1["type"] == "first"
+        
+        # Second task not ready yet
+        result2 = asyncio.run(self.scheduler.dequeue())
+        assert result2 is None
+        
+        # Wait for second task
+        time.sleep(0.05)
+        result3 = asyncio.run(self.scheduler.dequeue())
+        assert result3 is not None
+        assert result3["type"] == "second"
+    
+    def test_precondition_fail_requeues_task(self):
+        """Test that when atomic precondition fails, task is re-queued."""
+        # Create a scheduler and manually set up state to trigger precondition failure
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+        
+        # Manually add task to in_flight to simulate duplicate
+        self.scheduler._in_flight[task_id] = {"id": task_id, "type": "test"}
+        
+        # Now try to dequeue - should fail precondition and re-queue
+        result = asyncio.run(self.scheduler.dequeue())
+        # Should return None because precondition failed and re-queued
+        assert result is None
+        
+        # Task should still be in the queue
+        assert len(self.scheduler._queues["default"]) > 0
+    
+    def test_retry_success_then_budget_full(self):
+        """Test that retry succeeds when budget has space."""
+        # Add a task and dequeue it to get it in-flight
+        task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        
+        # Fail the task - should succeed retrying
+        result = self.scheduler.fail(task["id"])
+        assert result is True  # Retry succeeded
+    
+    def test_fail_nonexistent_task(self):
+        """Test failing a task that doesn't exist."""
+        result = self.scheduler.fail("non-existent-task-id")
+        assert result is False
+    
+    def test_complete_nonexistent_task(self):
+        """Test completing a task that doesn't exist."""
+        result = self.scheduler.complete("non-existent-task-id")
+        assert result is False
+
+
+class TestSchedulerExceptions:
+    """Tests for scheduler exceptions."""
+    
+    def test_invalid_state_transition_exception(self):
+        """Test that InvalidStateTransition can be raised and caught."""
+        from src.orchestrator.scheduler import InvalidStateTransition, SchedulerError
+        
+        # Can be raised
+        with pytest.raises(InvalidStateTransition):
+            raise InvalidStateTransition("test transition")
+        
+        # Is a subclass of SchedulerError
+        try:
+            raise InvalidStateTransition("test")
+        except SchedulerError as e:
+            assert "test" in str(e)
+    
+    def test_fairness_budget_exceeded_exception(self):
+        """Test that FairnessBudgetExceeded is a SchedulerError."""
+        from src.orchestrator.scheduler import SchedulerError
+        
+        try:
+            raise FairnessBudgetExceeded("budget exceeded")
+        except SchedulerError as e:
+            assert "budget exceeded" in str(e)
 
 
 class TestSchedulerRegression:
