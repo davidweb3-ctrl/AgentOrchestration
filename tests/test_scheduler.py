@@ -700,4 +700,297 @@ class TestSchedulerAdvancedFeatures:
 
 # 2026-01-12T16:53:28 update
 
+class TestSchedulerEdgeCases:
+    """Edge case tests for scheduler fairness and priority handling."""
+    
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+    
+    def test_priority_boundary_values(self):
+        """Test priority class boundary values (9, 10, 11, 49, 50, 51, 99, 100, 101)."""
+        # Test boundaries between LOW and NORMAL (priority 10)
+        low_boundary = self.scheduler.enqueue({"type": "low_boundary"}, priority=9)
+        normal_boundary_low = self.scheduler.enqueue({"type": "normal_boundary_low"}, priority=10)
+        normal_boundary_high = self.scheduler.enqueue({"type": "normal_boundary_high"}, priority=11)
+        
+        # Test boundaries between NORMAL and HIGH (priority 50)
+        high_boundary_low = self.scheduler.enqueue({"type": "high_boundary_low"}, priority=49)
+        high_boundary_mid = self.scheduler.enqueue({"type": "high_boundary_mid"}, priority=50)
+        high_boundary_high = self.scheduler.enqueue({"type": "high_boundary_high"}, priority=51)
+        
+        # Test boundaries between HIGH and URGENT (priority 100)
+        urgent_boundary_low = self.scheduler.enqueue({"type": "urgent_boundary_low"}, priority=99)
+        urgent_boundary_mid = self.scheduler.enqueue({"type": "urgent_boundary_mid"}, priority=100)
+        urgent_boundary_high = self.scheduler.enqueue({"type": "urgent_boundary_high"}, priority=101)
+        
+        # Verify correct priority class assignment
+        assert self.scheduler._task_priority_class[low_boundary] == PriorityClass.LOW
+        assert self.scheduler._task_priority_class[normal_boundary_low] == PriorityClass.NORMAL
+        assert self.scheduler._task_priority_class[normal_boundary_high] == PriorityClass.NORMAL
+        assert self.scheduler._task_priority_class[high_boundary_low] == PriorityClass.NORMAL
+        assert self.scheduler._task_priority_class[high_boundary_mid] == PriorityClass.HIGH
+        assert self.scheduler._task_priority_class[high_boundary_high] == PriorityClass.HIGH
+        assert self.scheduler._task_priority_class[urgent_boundary_low] == PriorityClass.HIGH
+        assert self.scheduler._task_priority_class[urgent_boundary_mid] == PriorityClass.URGENT
+        assert self.scheduler._task_priority_class[urgent_boundary_high] == PriorityClass.URGENT
+    
+    def test_zero_and_negative_priority(self):
+        """Test handling of zero and negative priority values."""
+        # Zero priority should map to LOW
+        zero_id = self.scheduler.enqueue({"type": "zero"}, priority=0)
+        assert self.scheduler._task_priority_class[zero_id] == PriorityClass.LOW
+        
+        # Negative priority should also map to LOW
+        negative_id = self.scheduler.enqueue({"type": "negative"}, priority=-10)
+        assert self.scheduler._task_priority_class[negative_id] == PriorityClass.LOW
+    
+    def test_very_high_priority(self):
+        """Test handling of very high priority values."""
+        # Very high priority should map to URGENT
+        very_high = self.scheduler.enqueue({"type": "very_high"}, priority=1000)
+        assert self.scheduler._task_priority_class[very_high] == PriorityClass.URGENT
+    
+    def test_budget_recovery_after_multiple_completions(self):
+        """Test budget correctly recovers after multiple task completions."""
+        # Fill up HIGH budget (max_concurrent=8)
+        task_ids = []
+        for i in range(8):
+            task_id = self.scheduler.enqueue({"type": "concurrent"}, priority=50)
+            task_ids.append(task_id)
+        
+        # Dequeue all to move to in-flight
+        for _ in range(8):
+            asyncio.run(self.scheduler.dequeue())
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 8
+        assert stats["high"]["utilization"] == 1.0
+        
+        # Complete 4 tasks
+        for i in range(4):
+            self.scheduler.complete(task_ids[i])
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 4
+        assert stats["high"]["utilization"] == 0.5
+        
+        # Complete remaining 4 tasks
+        for i in range(4, 8):
+            self.scheduler.complete(task_ids[i])
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+        assert stats["high"]["utilization"] == 0.0
+    
+    def test_budget_recovery_after_multiple_failures(self):
+        """Test budget correctly recovers after multiple task failures."""
+        # Fill up HIGH budget
+        task_ids = []
+        for i in range(5):
+            task_id = self.scheduler.enqueue({"type": "failing"}, priority=50)
+            task_ids.append(task_id)
+        
+        # Dequeue all
+        for _ in range(5):
+            asyncio.run(self.scheduler.dequeue())
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 5
+        
+        # Fail all tasks
+        for task_id in task_ids:
+            self.scheduler.fail(task_id)
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+        assert stats["high"]["utilization"] == 0.0
+    
+    def test_mixed_priority_with_budget_exhaustion(self):
+        """Test mixed priorities when some budgets are exhausted."""
+        # Fill LOW budget (20 tasks)
+        for i in range(20):
+            self.scheduler.enqueue({"type": "low_filler"}, priority=1)
+        
+        # Fill NORMAL budget (50 tasks)
+        for i in range(50):
+            self.scheduler.enqueue({"type": "normal_filler"}, priority=10)
+        
+        # URGENT and HIGH should still work
+        urgent_id = self.scheduler.enqueue({"type": "urgent"}, priority=100)
+        high_id = self.scheduler.enqueue({"type": "high"}, priority=50)
+        
+        assert urgent_id is not None
+        assert high_id is not None
+        
+        # Dequeue should return URGENT first, then HIGH
+        task1 = asyncio.run(self.scheduler.dequeue())
+        assert task1["type"] == "urgent"
+        
+        task2 = asyncio.run(self.scheduler.dequeue())
+        assert task2["type"] == "high"
+    
+    def test_task_id_uniqueness(self):
+        """Test that task IDs are unique."""
+        task_ids = set()
+        for i in range(50):  # Limited by HIGH budget (max_queue_depth=80)
+            task_id = self.scheduler.enqueue({"type": "test", "idx": i}, priority=50)
+            assert task_id not in task_ids, f"Duplicate task ID: {task_id}"
+            task_ids.add(task_id)
+        
+        assert len(task_ids) == 50
+    
+    def test_empty_task_payload(self):
+        """Test handling of empty task payload."""
+        task_id = self.scheduler.enqueue({}, priority=50)
+        assert task_id is not None
+        
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        assert task["id"] == task_id
+    
+    def test_large_task_payload(self):
+        """Test handling of large task payload."""
+        large_payload = {"data": "x" * 10000}
+        task_id = self.scheduler.enqueue(large_payload, priority=50)
+        assert task_id is not None
+        
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        assert "data" in task
+    
+    def test_rapid_enqueue_dequeue(self):
+        """Test rapid enqueue and dequeue operations."""
+        for i in range(20):  # Limited by HIGH budget in-flight (max_concurrent=8) + queued
+            task_id = self.scheduler.enqueue({"type": "rapid", "idx": i}, priority=50)
+            task = asyncio.run(self.scheduler.dequeue())
+            assert task is not None
+            # Complete task to free up budget
+            self.scheduler.complete(task_id)
+            assert task["idx"] == i
+    
+    def test_scheduler_reset_state(self):
+        """Test scheduler state after multiple operations."""
+        # Add and process many tasks
+        for i in range(50):
+            task_id = self.scheduler.enqueue({"type": "test"}, priority=50)
+            task = asyncio.run(self.scheduler.dequeue())
+            self.scheduler.complete(task_id)
+        
+        # Stats should show clean state
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 0
+        assert stats["high"]["queued_count"] == 0
+
+
+class TestSchedulerPerformance:
+    """Performance tests for scheduler operations."""
+    
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+    
+    def test_enqueue_performance(self):
+        """Test enqueue performance with many tasks."""
+        import time
+        
+        start = time.time()
+        for i in range(50):  # Limited by NORMAL budget (max_queue_depth=50)
+            self.scheduler.enqueue({"type": "perf", "idx": i}, priority=10)
+        elapsed = time.time() - start
+        
+        # Should complete 50 enqueues in reasonable time (< 1 second)
+        assert elapsed < 1.0, f"Enqueue too slow: {elapsed:.2f}s"
+    
+    def test_dequeue_performance(self):
+        """Test dequeue performance with many tasks."""
+        import time
+        
+        # Enqueue 50 tasks
+        for i in range(50):
+            self.scheduler.enqueue({"type": "perf", "idx": i}, priority=10)
+        
+        start = time.time()
+        for _ in range(50):
+            asyncio.run(self.scheduler.dequeue())
+        elapsed = time.time() - start
+        
+        # Should complete 50 dequeues in reasonable time (< 1 second)
+        assert elapsed < 1.0, f"Dequeue too slow: {elapsed:.2f}s"
+    
+    def test_priority_ordering_performance(self):
+        """Test priority ordering with many tasks."""
+        import time
+        
+        # Enqueue tasks with random priorities (limited by LOW budget)
+        import random
+        random.seed(42)
+        task_ids = []
+        priorities = [random.randint(1, 9) for _ in range(20)]  # LOW priority range
+        
+        start = time.time()
+        for p in priorities:
+            task_id = self.scheduler.enqueue({"type": "rand"}, priority=p)
+            task_ids.append(task_id)
+        
+        # Dequeue all and complete to free budget
+        for task_id in task_ids:
+            task = asyncio.run(self.scheduler.dequeue())
+            if task:
+                self.scheduler.complete(task_id)
+        
+        elapsed = time.time() - start
+        assert elapsed < 1.0, f"Priority ordering too slow: {elapsed:.2f}s"
+
+
+class TestSchedulerConcurrency:
+    """Concurrency tests for scheduler."""
+    
+    def setup_method(self):
+        self.scheduler = TaskScheduler()
+    
+    def test_concurrent_budget_tracking(self):
+        """Test budget tracking with concurrent operations."""
+        # Add tasks to max concurrent limit
+        task_ids = []
+        for i in range(8):
+            task_id = self.scheduler.enqueue({"type": "concurrent"}, priority=50)
+            task_ids.append(task_id)
+        
+        # Dequeue all
+        for _ in range(8):
+            asyncio.run(self.scheduler.dequeue())
+        
+        # Verify all are in-flight
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 8
+        
+        # Complete some, fail others
+        self.scheduler.complete(task_ids[0])
+        self.scheduler.complete(task_ids[1])
+        self.scheduler.fail(task_ids[2])
+        self.scheduler.fail(task_ids[3])
+        
+        stats = self.scheduler.get_fairness_stats()
+        assert stats["high"]["in_flight_count"] == 4
+    
+    def test_budget_exceeded_exactly_at_limit(self):
+        """Test budget exceeded when exactly at limit."""
+        # Fill to exactly LOW budget limit (20)
+        for i in range(20):
+            self.scheduler.enqueue({"type": "filler"}, priority=1)
+        
+        # Next should raise exception
+        with pytest.raises(FairnessBudgetExceeded):
+            self.scheduler.enqueue({"type": "overflow"}, priority=1)
+    
+    def test_budget_not_exceeded_one_below_limit(self):
+        """Test budget not exceeded when one below limit."""
+        # Fill to one below LOW budget limit (19)
+        for i in range(19):
+            self.scheduler.enqueue({"type": "filler"}, priority=1)
+        
+        # One more should succeed
+        task_id = self.scheduler.enqueue({"type": "last"}, priority=1)
+        assert task_id is not None
+
+
 # 2026-04-16T16:58:23 update
