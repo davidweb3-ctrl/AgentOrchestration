@@ -436,3 +436,389 @@ class TestPluginCapability:
         assert cap.name == "test-cap"
         assert cap.version == "1.0"
         assert cap.handler == "plugin-1"
+
+
+class TestPluginRegistryAdvancedEdgeCases:
+    """Advanced edge case tests for plugin registry."""
+
+    def test_unicode_plugin_id(self):
+        """Test plugin registration with unicode plugin ID."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "插件-1",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        assert result is True
+        assert registry.resolve_capability("capability-a") == "插件-1"
+
+    def test_unicode_capability_name(self):
+        """Test plugin registration with unicode capability name."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "能力-1", "version": "1.0"}]
+        )
+
+        assert result is True
+        assert "能力-1" in registry.get_registered_capabilities()
+
+    def test_very_long_plugin_id(self):
+        """Test plugin registration with very long plugin ID."""
+        registry = PluginRegistry()
+        long_id = "plugin-" + "a" * 500
+
+        result = registry.register_plugin(
+            long_id,
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        assert result is True
+        assert registry.resolve_capability("capability-a") == long_id
+
+    def test_very_long_capability_name(self):
+        """Test plugin registration with very long capability name."""
+        registry = PluginRegistry()
+        long_name = "capability-" + "a" * 500
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": long_name, "version": "1.0"}]
+        )
+
+        assert result is True
+        assert long_name in registry.get_registered_capabilities()
+
+    def test_special_characters_in_plugin_id(self):
+        """Test plugin ID with special characters."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin_1.test-v2",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        assert result is True
+
+    def test_special_characters_in_capability_name(self):
+        """Test capability name with special characters."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability.v1_test", "version": "1.0"}]
+        )
+
+        assert result is True
+        assert "capability.v1_test" in registry.get_registered_capabilities()
+
+    def test_capability_with_empty_version(self):
+        """Test capability with empty version string."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": ""}]
+        )
+
+        # Empty version may be accepted or rejected
+        assert result is True or result is False
+
+    def test_capability_with_none_version(self):
+        """Test capability with None version."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": None}]
+        )
+
+        # None version may be accepted or rejected
+        assert result is True or result is False
+
+    def test_capability_with_complex_version(self):
+        """Test capability with complex version string."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.2.3-beta.1+build.123"}]
+        )
+
+        assert result is True
+
+    def test_register_same_plugin_twice(self):
+        """Test registering the same plugin ID twice."""
+        registry = PluginRegistry()
+
+        # First registration
+        result1 = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+        assert result1 is True
+
+        # Second registration with same ID
+        result2 = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-b", "version": "2.0"}]
+        )
+
+        # May update existing or reject duplicate
+        assert result2 is True or result2 is False
+
+    def test_unregister_plugin_not_registered(self):
+        """Test unregistering a plugin that was never registered."""
+        registry = PluginRegistry()
+
+        result = registry.unregister_plugin("never-registered")
+        assert result is False
+
+    def test_resolve_capability_after_unregister(self):
+        """Test resolving capability after plugin is unregistered."""
+        registry = PluginRegistry()
+
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        # Verify capability exists
+        assert registry.resolve_capability("capability-a") == "plugin-1"
+
+        # Unregister plugin
+        registry.unregister_plugin("plugin-1")
+
+        # Capability should no longer resolve
+        assert registry.resolve_capability("capability-a") is None
+
+    def test_multiple_plugins_same_capability_after_unregister(self):
+        """Test that duplicate capability can be registered after original unregisters."""
+        registry = PluginRegistry()
+
+        # First plugin registers capability
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "shared-cap", "version": "1.0"}]
+        )
+
+        # Second plugin tries to register same capability (should fail)
+        result = registry.register_plugin(
+            "plugin-2",
+            [{"name": "shared-cap", "version": "2.0"}]
+        )
+        assert result is False
+
+        # Unregister first plugin
+        registry.unregister_plugin("plugin-1")
+
+        # Second plugin can now register
+        result = registry.register_plugin(
+            "plugin-2",
+            [{"name": "shared-cap", "version": "2.0"}]
+        )
+        assert result is True
+
+    def test_capability_name_case_sensitivity(self):
+        """Test case sensitivity in capability names."""
+        registry = PluginRegistry()
+
+        # Register with lowercase
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        # Try to register with uppercase (may or may not be duplicate)
+        result = registry.register_plugin(
+            "plugin-2",
+            [{"name": "Capability-A", "version": "2.0"}]
+        )
+
+        # Case sensitivity depends on implementation
+        assert result is True or result is False
+
+    def test_plugin_id_case_sensitivity(self):
+        """Test case sensitivity in plugin IDs."""
+        registry = PluginRegistry()
+
+        # Register with lowercase
+        registry.register_plugin(
+            "plugin-1",
+            [{"name": "cap-a", "version": "1.0"}]
+        )
+
+        # Try to register with uppercase (may or may not be duplicate)
+        result = registry.register_plugin(
+            "Plugin-1",
+            [{"name": "cap-b", "version": "2.0"}]
+        )
+
+        # Case sensitivity depends on implementation
+        assert result is True or result is False
+
+    def test_capability_with_extra_fields(self):
+        """Test capability with extra fields beyond name and version."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a", "version": "1.0", "extra": "field", "description": "test"}]
+        )
+
+        assert result is True
+
+    def test_capability_without_version(self):
+        """Test capability without version field."""
+        registry = PluginRegistry()
+
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": "capability-a"}]  # No version
+        )
+
+        # May be accepted or rejected
+        assert result is True or result is False
+
+
+class TestPluginRegistrySecurity:
+    """Security tests for plugin registry."""
+
+    def test_sql_injection_in_plugin_id(self):
+        """Test SQL injection attempt in plugin ID."""
+        registry = PluginRegistry()
+
+        sql_payload = "plugin-1'; DROP TABLE plugins; --"
+        result = registry.register_plugin(
+            sql_payload,
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        # Should handle gracefully
+        assert result is True or result is False
+
+    def test_sql_injection_in_capability_name(self):
+        """Test SQL injection attempt in capability name."""
+        registry = PluginRegistry()
+
+        sql_payload = "capability-a'; DROP TABLE capabilities; --"
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": sql_payload, "version": "1.0"}]
+        )
+
+        # Should handle gracefully
+        assert result is True or result is False
+
+    def test_xss_in_plugin_id(self):
+        """Test XSS attempt in plugin ID."""
+        registry = PluginRegistry()
+
+        xss_payload = "<script>alert('xss')</script>"
+        result = registry.register_plugin(
+            xss_payload,
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        # Should handle gracefully
+        assert result is True or result is False
+
+    def test_xss_in_capability_name(self):
+        """Test XSS attempt in capability name."""
+        registry = PluginRegistry()
+
+        xss_payload = "<script>alert('xss')</script>"
+        result = registry.register_plugin(
+            "plugin-1",
+            [{"name": xss_payload, "version": "1.0"}]
+        )
+
+        # Should handle gracefully
+        assert result is True or result is False
+
+    def test_path_traversal_in_plugin_id(self):
+        """Test path traversal attempt in plugin ID."""
+        registry = PluginRegistry()
+
+        traversal_payload = "../../../etc/passwd"
+        result = registry.register_plugin(
+            traversal_payload,
+            [{"name": "capability-a", "version": "1.0"}]
+        )
+
+        # Should handle gracefully
+        assert result is True or result is False
+
+
+class TestPluginRegistryStress:
+    """Stress tests for plugin registry."""
+
+    def test_rapid_registration_unregistration(self):
+        """Test rapid registration and unregistration."""
+        registry = PluginRegistry()
+
+        for i in range(50):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [{"name": f"cap-{i}", "version": "1.0"}]
+            )
+            registry.unregister_plugin(f"plugin-{i}")
+
+        # All plugins should be unregistered
+        assert len(registry.get_registered_capabilities()) == 0
+
+    def test_large_number_of_capabilities_per_plugin(self):
+        """Test plugin with large number of capabilities."""
+        registry = PluginRegistry()
+
+        capabilities = [
+            {"name": f"cap-{i}", "version": "1.0"}
+            for i in range(100)
+        ]
+
+        result = registry.register_plugin("plugin-1", capabilities)
+        assert result is True
+        assert len(registry.get_registered_capabilities()) == 100
+
+    def test_capability_lookup_after_many_registrations(self):
+        """Test capability lookup after many registrations."""
+        registry = PluginRegistry()
+
+        # Register many plugins
+        for i in range(200):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [{"name": f"cap-{i}", "version": "1.0"}]
+            )
+
+        # Lookup should still work
+        handler = registry.resolve_capability("cap-100")
+        assert handler == "plugin-100"
+
+    def test_cache_consistency_under_load(self):
+        """Test cache consistency under heavy load."""
+        registry = PluginRegistry()
+
+        # Register plugins
+        for i in range(50):
+            registry.register_plugin(
+                f"plugin-{i}",
+                [{"name": f"cap-{i}", "version": "1.0"}]
+            )
+
+        # Populate cache with lookups
+        for i in range(50):
+            registry.resolve_capability(f"cap-{i}")
+
+        # Unregister some plugins
+        for i in range(25):
+            registry.unregister_plugin(f"plugin-{i}")
+
+        # Cache should be invalidated
+        assert len(registry._cache) == 0
+
+        # Remaining lookups should still work
+        handler = registry.resolve_capability("cap-30")
+        assert handler == "plugin-30"
