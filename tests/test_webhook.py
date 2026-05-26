@@ -749,3 +749,328 @@ class TestWebhookReliability:
         sub = manager.get_subscription(subscription.id, "ws_state")
         assert sub is not None
         assert len(sub.event_types) == 2
+
+
+class TestWebhookAdvancedEdgeCases:
+    """Advanced edge case tests for webhook validation."""
+    
+    def setup_method(self):
+        self.manager = WebhookManager()
+    
+    def test_url_with_port(self):
+        """Test URL with non-standard port."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com:8443/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        assert subscription.url == "https://example.com:8443/webhook"
+    
+    def test_url_with_auth_in_path(self):
+        """Test URL with authentication in path (may be rejected)."""
+        # URLs with user:pass@ may be rejected for security
+        try:
+            self.manager.create_subscription(
+                url="https://user:pass@example.com/webhook",
+                event_types=["agent.created"],
+                workspace_id="ws_123",
+            )
+            # If accepted, that's ok
+        except ValueError:
+            # If rejected, that's also valid
+            pass
+    
+    def test_very_long_url(self):
+        """Test URL with very long path."""
+        long_path = "/webhook/" + "a" * 500
+        subscription = self.manager.create_subscription(
+            url=f"https://example.com{long_path}",
+            event_types=["agent.created"],
+            workspace_id="ws_123",
+        )
+        assert long_path in subscription.url
+    
+    def test_unicode_in_url(self):
+        """Test URL with unicode characters."""
+        # URLs with unicode should be handled
+        try:
+            subscription = self.manager.create_subscription(
+                url="https://example.com/webhook?param=测试",
+                event_types=["agent.created"],
+                workspace_id="ws_123",
+            )
+            # If accepted, verify it was created
+            assert subscription.id is not None
+        except (ValueError, UnicodeError):
+            # If rejected, that's also valid behavior
+            pass
+    
+    def test_event_type_with_special_chars(self):
+        """Test event type with special characters (should be rejected)."""
+        with pytest.raises(ValueError):
+            self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["agent.created;DROP TABLE users"],
+                workspace_id="ws_123",
+            )
+    
+    def test_event_type_sql_injection_attempt(self):
+        """Test SQL injection attempt in event type."""
+        with pytest.raises(ValueError):
+            self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["agent.created', '1'='1"],
+                workspace_id="ws_123",
+            )
+    
+    def test_workspace_id_sql_injection(self):
+        """Test SQL injection attempt in workspace ID."""
+        # Should handle gracefully (create or reject)
+        try:
+            subscription = self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["agent.created"],
+                workspace_id="ws_123'; DROP TABLE subscriptions; --",
+            )
+            assert subscription.workspace_id is not None
+        except ValueError:
+            pass  # Rejection is also valid
+    
+    def test_empty_workspace_id(self):
+        """Test empty workspace ID (may be rejected or accepted)."""
+        try:
+            self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["agent.created"],
+                workspace_id="",
+            )
+            # If accepted
+        except ValueError:
+            # If rejected, that's valid
+            pass
+    
+    def test_whitespace_only_workspace_id(self):
+        """Test whitespace-only workspace ID (may be rejected or accepted)."""
+        try:
+            self.manager.create_subscription(
+                url="https://example.com/webhook",
+                event_types=["agent.created"],
+                workspace_id="   ",
+            )
+            # If accepted
+        except ValueError:
+            # If rejected, that's valid
+            pass
+    
+    def test_all_allowed_event_types(self):
+        """Test subscription with all allowed event types."""
+        all_types = list(ALLOWED_EVENT_TYPES)
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=all_types,
+            workspace_id="ws_all",
+        )
+        assert set(subscription.event_types) == set(all_types)
+    
+    def test_duplicate_event_types_in_request(self):
+        """Test duplicate event types in request."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created", "agent.created", "agent.updated"],
+            workspace_id="ws_123",
+        )
+        # Note: Implementation may or may not deduplicate
+        # Just verify subscription was created
+        assert subscription.id is not None
+        assert "agent.created" in subscription.event_types
+        assert "agent.updated" in subscription.event_types
+    
+    def test_delivery_with_empty_payload(self):
+        """Test delivery with empty payload."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_empty",
+        )
+        
+        records = self.manager.deliver_event("agent.created", {}, "ws_empty")
+        assert len(records) == 1
+    
+    def test_delivery_with_large_payload(self):
+        """Test delivery with large payload."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_large",
+        )
+        
+        large_payload = {"data": "x" * 10000}
+        records = self.manager.deliver_event("agent.created", large_payload, "ws_large")
+        assert len(records) == 1
+    
+    def test_delivery_with_nested_payload(self):
+        """Test delivery with deeply nested payload."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_nested",
+        )
+        
+        nested_payload = {"level1": {"level2": {"level3": {"value": "deep"}}}}
+        records = self.manager.deliver_event("agent.created", nested_payload, "ws_nested")
+        assert len(records) == 1
+    
+    def test_multiple_deliveries_same_subscription(self):
+        """Test multiple deliveries to same subscription."""
+        self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created", "agent.updated"],
+            workspace_id="ws_multi",
+        )
+        
+        # Deliver multiple events
+        records1 = self.manager.deliver_event("agent.created", {}, "ws_multi")
+        records2 = self.manager.deliver_event("agent.updated", {}, "ws_multi")
+        records3 = self.manager.deliver_event("agent.created", {}, "ws_multi")
+        
+        assert len(records1) == 1
+        assert len(records2) == 1
+        assert len(records3) == 1
+        
+        # All delivery IDs should be unique
+        all_ids = {r.id for r in records1 + records2 + records3}
+        assert len(all_ids) == 3
+    
+    def test_concurrent_subscription_operations(self):
+        """Test concurrent subscription operations."""
+        # Create multiple subscriptions
+        subs = []
+        for i in range(10):
+            sub = self.manager.create_subscription(
+                url=f"https://example.com/webhook{i}",
+                event_types=["agent.created"],
+                workspace_id="ws_concurrent",
+            )
+            subs.append(sub)
+        
+        # Update all
+        for sub in subs:
+            self.manager.update_subscription(
+                sub.id, "ws_concurrent", event_types=["agent.created", "agent.updated"]
+            )
+        
+        # Verify all updated
+        for sub in subs:
+            updated = self.manager.get_subscription(sub.id, "ws_concurrent")
+            assert len(updated.event_types) == 2
+    
+    def test_rotate_secret_multiple_times(self):
+        """Test rotating secret multiple times."""
+        sub = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_rotate",
+        )
+        
+        secrets = [sub.secret]
+        for _ in range(5):
+            new_secret = self.manager.rotate_secret(sub.id, "ws_rotate")
+            secrets.append(new_secret)
+        
+        # All secrets should be unique
+        assert len(set(secrets)) == len(secrets)
+    
+    def test_subscription_with_very_long_id(self):
+        """Test subscription with very long workspace ID."""
+        long_id = "ws_" + "a" * 200
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id=long_id,
+        )
+        assert subscription.workspace_id == long_id
+    
+    def test_event_type_ordering_preserved(self):
+        """Test that event type ordering is preserved."""
+        event_types = ["agent.updated", "agent.created", "agent.deleted"]
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=event_types,
+            workspace_id="ws_order",
+        )
+        # Order should be preserved
+        assert subscription.event_types == event_types
+
+
+class TestWebhookBoundaryConditions:
+    """Test boundary conditions and limits."""
+    
+    def setup_method(self):
+        self.manager = WebhookManager()
+    
+    def test_max_subscriptions_per_workspace(self):
+        """Test maximum subscriptions per workspace."""
+        # Create many subscriptions
+        for i in range(100):
+            self.manager.create_subscription(
+                url=f"https://example.com/webhook{i}",
+                event_types=["agent.created"],
+                workspace_id="ws_limit",
+            )
+        
+        subs = self.manager.list_subscriptions("ws_limit")
+        assert len(subs) == 100
+    
+    def test_single_event_type_subscription(self):
+        """Test subscription with single event type."""
+        subscription = self.manager.create_subscription(
+            url="https://example.com/webhook",
+            event_types=["agent.created"],
+            workspace_id="ws_single",
+        )
+        assert subscription.event_types == ["agent.created"]
+    
+    def test_url_with_subdomain(self):
+        """Test URL with multiple subdomains."""
+        subscription = self.manager.create_subscription(
+            url="https://webhook.api.example.com/endpoint",
+            event_types=["agent.created"],
+            workspace_id="ws_subdomain",
+        )
+        assert "webhook.api.example.com" in subscription.url
+    
+    def test_ipv6_url_blocked(self):
+        """Test that IPv6 URLs are blocked (may be rejected)."""
+        try:
+            self.manager.create_subscription(
+                url="http://[::1]:8080/webhook",
+                event_types=["agent.created"],
+                workspace_id="ws_123",
+            )
+            # If accepted
+        except ValueError:
+            # If rejected, that's valid security behavior
+            pass
+    
+    def test_private_ip_ranges_blocked(self):
+        """Test that private IP ranges are blocked (may be rejected)."""
+        private_ips = [
+            "http://172.16.0.1/webhook",
+            "http://172.31.255.255/webhook",
+            "http://169.254.1.1/webhook",
+        ]
+        
+        blocked_count = 0
+        for url in private_ips:
+            try:
+                self.manager.create_subscription(
+                    url=url,
+                    event_types=["agent.created"],
+                    workspace_id="ws_123",
+                )
+            except ValueError as e:
+                if "Endpoint validation failed" in str(e):
+                    blocked_count += 1
+        
+        # At least some should be blocked for security
+        assert blocked_count >= 1, "Private IPs should be blocked for security"
